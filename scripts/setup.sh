@@ -258,6 +258,17 @@ load_env() {
     ANYSCALE_HOST="$(default_anyscale_host)"
     export ANYSCALE_HOST
   fi
+
+  # kubelogin (--login azurecli) and the Azure Go SDK do not honor `az account
+  # set --subscription`'s tenant. Without AZURE_TENANT_ID, requests resolve to
+  # the signed-in user's home tenant and produce a misleading AADSTS50020 error
+  # when that tenant differs from the deployment tenant (common for Microsoft
+  # FTEs deploying into a sandbox or customer tenant). Export it explicitly so
+  # every subprocess (terraform, az, kubectl/kubelogin, anyscale) agrees.
+  : "${AZURE_TENANT_ID:=${ARM_TENANT_ID:-${TF_VAR_azure_tenant_id:-}}}"
+  if [[ -n "${AZURE_TENANT_ID}" ]]; then
+    export AZURE_TENANT_ID
+  fi
 }
 
 require_env_var() {
@@ -3359,6 +3370,7 @@ USAGE
 
   if [[ "${admin}" != true ]]; then
     KUBECONFIG="${kubeconfig_file}" kubelogin convert-kubeconfig -l azurecli >/dev/null
+    inject_kubelogin_tenant_id "${kubeconfig_file}"
   fi
 
   kubectl_readyz "${kubeconfig_file}"
@@ -3416,6 +3428,68 @@ ensure_kubelogin_kubeconfig() {
   require_cmd kubelogin
   use_bastion_kubeconfig_if_present
   kubelogin convert-kubeconfig -l azurecli >/dev/null 2>&1 || true
+}
+
+# Bake --tenant-id into the kubelogin exec args of a converted kubeconfig so
+# `kubectl` invocations from a fresh shell (without AZURE_TENANT_ID in env) do
+# not fall back to the signed-in user's home tenant, which yields a misleading
+# AADSTS50020 error when the home tenant differs from the deployment tenant.
+inject_kubelogin_tenant_id() {
+  local kubeconfig_file="$1"
+  local tenant_id="${AZURE_TENANT_ID:-${ARM_TENANT_ID:-${TF_VAR_azure_tenant_id:-}}}"
+
+  [[ -n "${tenant_id}" ]] || return 0
+  [[ -f "${kubeconfig_file}" ]] || return 0
+
+  if command -v yq >/dev/null 2>&1; then
+    TENANT_ID="${tenant_id}" yq -i '
+      (.users[].user.exec |
+        select(.command == "kubelogin") |
+        .args) |= (
+          (. - ["--tenant-id", strenv(TENANT_ID)]) + ["--tenant-id", strenv(TENANT_ID)]
+        )
+    ' "${kubeconfig_file}" 2>/dev/null || {
+      warn "Failed to inject --tenant-id into ${kubeconfig_file} via yq; kubectl from a fresh shell may need AZURE_TENANT_ID exported."
+      return 0
+    }
+  elif command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' >/dev/null 2>&1; then
+    if ! TENANT_ID="${tenant_id}" KUBECONFIG_FILE="${kubeconfig_file}" python3 - <<'PY'
+import os, yaml
+path = os.environ["KUBECONFIG_FILE"]
+tenant = os.environ["TENANT_ID"]
+with open(path) as f:
+    cfg = yaml.safe_load(f)
+changed = False
+for u in cfg.get("users", []) or []:
+    exec_block = (u.get("user") or {}).get("exec") or {}
+    if exec_block.get("command") != "kubelogin":
+        continue
+    args = list(exec_block.get("args") or [])
+    cleaned = []
+    skip = False
+    for a in args:
+        if skip:
+            skip = False
+            continue
+        if a == "--tenant-id":
+            skip = True
+            continue
+        cleaned.append(a)
+    cleaned += ["--tenant-id", tenant]
+    exec_block["args"] = cleaned
+    changed = True
+if changed:
+    with open(path, "w") as f:
+        yaml.safe_dump(cfg, f, default_flow_style=False)
+PY
+    then
+      warn "Failed to inject --tenant-id into ${kubeconfig_file} via python3; kubectl from a fresh shell may need AZURE_TENANT_ID exported."
+      return 0
+    fi
+  else
+    warn "Neither yq nor python3+PyYAML is available; skipping --tenant-id injection into ${kubeconfig_file}. Export AZURE_TENANT_ID in new shells before running kubectl."
+    return 0
+  fi
 }
 
 validation_namespace() {
