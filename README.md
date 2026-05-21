@@ -66,6 +66,7 @@ The visible operator surface is intentionally small:
 ```bash
 ./scripts/setup.sh deploy --from-scratch --yes
 ./scripts/setup.sh verify --full
+./scripts/setup.sh workload proof pipeline
 ./scripts/setup.sh workload proof all
 ```
 
@@ -83,7 +84,9 @@ Each run writes console progress and per-stage logs under `.cache/aks-anyscale-s
 
 `verify --full` runs the static Terraform checks and then the live health/focused validation path through Bastion. Use `verify --static` for local configuration checks only, or `verify --live --skip-observability` when Log Analytics ingestion is not ready yet.
 
-`workload proof all` pushes deterministic Ray scripts from `workloads/proofs/` into the durable CPU and GPU workspaces and executes them there. The CPU proof computes squares for rows `0..15` and must print `CPU_RAY_PROOF_OK`; the GPU proof requires a Ray task with `num_gpus=1`, verifies `CUDA_VISIBLE_DEVICES`, computes cubes for rows `0..7`, and must print `GPU_RAY_PROOF_OK`. The command collects Anyscale workspace logs plus AKS pod, operator, container, and event diagnostics into the run directory.
+`workload proof pipeline` runs the deterministic Anyscale CPU-build / GPU-train / GPU-serve proof flow from `workloads/proofs/`. The build job runs on `aks-cpu`, must print `CPU_BUILD_JOB_PROOF_OK`, and writes `CPU_BUILD_MANIFEST_JSON`. The train job runs on `aks-gpu`, must print `GPU_TRAIN_JOB_PROOF_OK`, and writes `GPU_TRAIN_MODEL_JSON`. The service proof deploys `anyscale_serve_gpu_proof:app` on `aks-gpu` and must answer both health and prediction probes with `GPU_SERVE_SERVICE_PROOF_OK`.
+
+`workload proof all` now runs both durable workspace proofs plus that build/train/serve pipeline. The CPU workspace proof computes squares for rows `0..15` and must print `CPU_RAY_PROOF_OK`; the GPU workspace proof requires a Ray task with `num_gpus=1`, verifies `CUDA_VISIBLE_DEVICES`, computes cubes for rows `0..7`, and must print `GPU_RAY_PROOF_OK`. The run directory captures workspace diagnostics plus pipeline job logs, emitted manifest/model artifacts, service status, and service probe responses under `jobs/` and `services/`.
 
 For repeatability testing, use the built-in idempotency harness:
 
@@ -110,12 +113,13 @@ Existing compute configs and workspaces with the same names are reused, so `depl
 After deployment, run the deterministic workload proof:
 
 ```bash
+./scripts/setup.sh workload proof pipeline
 ./scripts/setup.sh workload proof all
 ```
 
-Use `workload proof cpu` or `workload proof gpu` when you only need one side. The proof command starts or reuses the target workspace, pushes the scripts under `workloads/proofs/`, runs them in the workspace through the Anyscale CLI, checks the expected success marker, and collects diagnostics under `.cache/aks-anyscale-sample-harness/runs/<timestamp>-workload-*/diagnostics/`.
+Use `workload proof cpu` or `workload proof gpu` when you only need one durable workspace proof. Use `workload proof pipeline` when you only need the Anyscale CPU-build / GPU-train / GPU-serve pipeline. `workload proof all` runs both workspace proofs and the pipeline. The proof command starts or reuses the target workspace, pushes the scripts under `workloads/proofs/`, runs them through the Anyscale CLI from the private-cluster path, checks the expected success markers, and collects diagnostics under `.cache/aks-anyscale-sample-harness/runs/<timestamp>-workload-*/`.
 
-The generated diagnostics include Anyscale workspace log tails and downloadable workspace logs when available, plus AKS workspace pod listings, pod descriptions, operator logs, workspace container logs, and namespace events. That gives first-run failures enough context to debug either the Anyscale layer or the Kubernetes scheduling/runtime layer.
+The generated diagnostics include Anyscale workspace log tails and downloadable workspace logs when available, plus AKS workspace pod listings, pod descriptions, operator logs, workspace container logs, namespace events, pipeline job logs, saved manifest/model JSON, and service probe outputs. That gives first-run failures enough context to debug either the Anyscale layer or the Kubernetes scheduling/runtime layer.
 
 You can still use the Anyscale console for manual inspection. The expected end state is that `aks-cpu-workspace` and `aks-gpu-workspace` are `RUNNING`, `aks-cpu-workspace` can run Ray CPU tasks, and `aks-gpu-workspace` can run Ray tasks requiring `num_gpus=1` with `CUDA_VISIBLE_DEVICES` set.
 
@@ -177,7 +181,7 @@ This repository provisions its own AKS cluster today, but the same integration p
 - `./scripts/setup.sh deploy` completes without manual portal repair work, and the Azure-native Anyscale cloud resource plus the `anyscaleoperator` AKS extension both reach `Succeeded`.
 - `./scripts/setup.sh verify --full` passes, proving private API access, firewall-routed egress, Workload Identity storage access, internal ingress reachability, GPU scheduling, workspace readiness, and observability when enabled.
 - The deploy stage registers the `aks-cpu` and `aks-gpu` compute configs, registers `aks-cpu-workspace` and `aks-gpu-workspace`, starts both workspaces, waits until they reach `RUNNING`, and confirms warm CPU and GPU worker pods are online on the expected node pools.
-- `./scripts/setup.sh workload proof all` passes and emits both `CPU_RAY_PROOF_OK` and `GPU_RAY_PROOF_OK` from the durable workspaces.
+- `./scripts/setup.sh workload proof all` passes and emits `CPU_RAY_PROOF_OK`, `GPU_RAY_PROOF_OK`, `CPU_BUILD_JOB_PROOF_OK`, `GPU_TRAIN_JOB_PROOF_OK`, and `GPU_SERVE_SERVICE_PROOF_OK`, proving both durable workspaces plus the CPU-build / GPU-train / GPU-serve pipeline across the expected AKS CPU and GPU pools.
 - The end-to-end path is repeatable: rerunning `deploy`, `verify --full`, and `workload proof all` reuses existing durable infrastructure and returns the same deterministic markers.
 
 ## Inspect the environment during and after deployment

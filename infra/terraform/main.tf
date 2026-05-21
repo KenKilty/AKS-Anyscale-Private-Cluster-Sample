@@ -319,5 +319,5 @@ module "cluster_bootstrap" {
   ingress_release_name               = var.cluster_bootstrap.ingress_release_name
   ingress_chart_version              = var.cluster_bootstrap.ingress_chart_version
 
-  depends_on = [module.aks]
+  depends_on = [module.aks, module.bastion]
 }

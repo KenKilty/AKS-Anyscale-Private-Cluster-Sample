@@ -386,10 +386,10 @@ variable "anyscale_platform" {
       poll_interval_seconds                 = optional(number, 20)
     }), {})
     destroy_workaround = optional(object({
-      enabled                             = optional(bool, true)
-      runtime_termination_timeout_seconds = optional(number)
+      enabled                               = optional(bool, true)
+      runtime_termination_timeout_seconds   = optional(number)
       workspace_termination_timeout_seconds = optional(number)
-      poll_interval_seconds               = optional(number, 20)
+      poll_interval_seconds                 = optional(number, 20)
     }), {})
   })
 

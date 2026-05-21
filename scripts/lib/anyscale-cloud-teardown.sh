@@ -224,7 +224,7 @@ terminate_job() {
   esac
 
   if output="$(run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS}" \
-    "${cli_bin}" job terminate --id "${job_id}" --cloud "${ANYSCALE_CLOUD_NAME}" 2>&1)"; then
+    "${cli_bin}" job terminate --id "${job_id}" 2>&1)"; then
     printf '%s\n' "${output}" >> "${terminate_log}"
     log "Terminate requested for job ${job_name} (${job_id})"
     return 0

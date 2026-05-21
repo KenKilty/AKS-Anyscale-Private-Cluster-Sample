@@ -1,10 +1,10 @@
 locals {
-  anyscale_platform_enabled                                  = var.anyscale_platform.enabled
-  anyscale_platform_cloud_name                               = coalesce(var.anyscale_platform.cloud_name, local.suffix)
-  anyscale_platform_cloud_control_plane_name                 = "/subscriptions/${var.azure_subscription_id}/resourcegroups/${azurerm_resource_group.this.name}/providers/anyscale.platform/clouds/${local.anyscale_platform_cloud_name}"
-  anyscale_platform_cloud_arm_id                             = "${azurerm_resource_group.this.id}/providers/Anyscale.Platform/clouds/${local.anyscale_platform_cloud_name}"
-  anyscale_platform_extension_name                           = var.anyscale_platform.extension_resource_name
-  anyscale_platform_extension_release_train                  = contains(["stable", "preview"], lower(var.anyscale_platform.release_train)) ? title(lower(var.anyscale_platform.release_train)) : var.anyscale_platform.release_train
+  anyscale_platform_enabled                  = var.anyscale_platform.enabled
+  anyscale_platform_cloud_name               = coalesce(var.anyscale_platform.cloud_name, local.suffix)
+  anyscale_platform_cloud_control_plane_name = "/subscriptions/${var.azure_subscription_id}/resourcegroups/${azurerm_resource_group.this.name}/providers/anyscale.platform/clouds/${local.anyscale_platform_cloud_name}"
+  anyscale_platform_cloud_arm_id             = "${azurerm_resource_group.this.id}/providers/Anyscale.Platform/clouds/${local.anyscale_platform_cloud_name}"
+  anyscale_platform_extension_name           = var.anyscale_platform.extension_resource_name
+  anyscale_platform_extension_release_train  = contains(["stable", "preview"], lower(var.anyscale_platform.release_train)) ? title(lower(var.anyscale_platform.release_train)) : var.anyscale_platform.release_train
   anyscale_platform_destroy_workaround_enabled = coalesce(
     try(var.anyscale_platform.teardown.enabled, null),
     try(var.anyscale_platform.destroy_workaround.enabled, null),
@@ -205,10 +205,11 @@ resource "azurerm_kubernetes_cluster_extension" "anyscale_operator" {
   ]
 }
 
-# Azure cloud teardown hook: while the cloud, extension, and AKS backing
-# resources still exist, drain Anyscale jobs, services, workspaces, and
-# cluster sessions, then delete the cloud before Terraform proceeds to the
-# extension and AKS teardown.
+# Azure cloud teardown hook: while the cloud, extension, AKS backing
+# resources, and private-link dependencies still exist, drain Anyscale jobs,
+# services, workspaces, and cluster sessions, then delete the cloud before
+# Terraform proceeds to extension, AKS, private endpoint, DNS, and network
+# teardown.
 resource "terraform_data" "anyscale_platform_destroy_workaround" {
   count = local.anyscale_platform_enabled && local.anyscale_platform_destroy_workaround_enabled ? 1 : 0
 
@@ -240,7 +241,17 @@ resource "terraform_data" "anyscale_platform_destroy_workaround" {
   depends_on = [
     azapi_resource.anyscale_platform,
     azurerm_kubernetes_cluster_extension.anyscale_operator,
+    module.acr,
     module.aks,
+    module.bastion,
     module.cluster_bootstrap,
+    module.dns,
+    module.dns_resolver,
+    module.firewall,
+    module.identity,
+    module.network,
+    module.observability,
+    module.routing,
+    module.storage,
   ]
 }

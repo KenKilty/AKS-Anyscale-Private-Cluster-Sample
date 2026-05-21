@@ -57,9 +57,37 @@ SETUP_STAGE_LOG_DIR=""
 SETUP_STAGE_INDEX=0
 SETUP_STAGE_TOTAL=0
 SETUP_STAGE_RESULTS=()
+WORKLOAD_LAST_HEAD_POD=""
 
 escape_env_double_quoted() {
   printf '%s' "$1" | sed 's/[\\"]/\\&/g'
+}
+
+shell_join() {
+  local joined=""
+  local arg
+
+  for arg in "$@"; do
+    printf -v joined '%s%q ' "${joined}" "${arg}"
+  done
+
+  printf '%s\n' "${joined% }"
+}
+
+write_export_env_script() {
+  local output_file="$1"
+  shift
+
+  : > "${output_file}"
+
+  local env_spec env_name env_value
+  for env_spec in "$@"; do
+    [[ "${env_spec}" == *=* ]] || die "Expected environment assignment in KEY=VALUE form, got '${env_spec}'."
+    env_name="${env_spec%%=*}"
+    env_value="${env_spec#*=}"
+    [[ "${env_name}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "Invalid environment variable name '${env_name}'."
+    printf 'export %s=%q\n' "${env_name}" "${env_value}" >> "${output_file}"
+  done
 }
 
 set_env_file_var() {
@@ -961,7 +989,7 @@ run_focused_validation_check() {
   printf '\n==> %s\n' "${label}"
   local exit_code
   set +e
-  "$@" 2>&1 | tee "${logfile}"
+  ( set -e; "$@" ) 2>&1 | tee "${logfile}"
   exit_code=${PIPESTATUS[0]}
   set -e
 
@@ -2572,7 +2600,7 @@ run_stage() {
 
   log "[${SETUP_STAGE_INDEX}/${SETUP_STAGE_TOTAL}] ${stage_name} started"
   set +e
-  ( "$@" ) 2>&1 | tee "${log_file}"
+  ( set -e; "$@" ) 2>&1 | tee "${log_file}"
   exit_code=${PIPESTATUS[0]}
   set -e
 
@@ -4874,13 +4902,89 @@ workload_require_inputs() {
   require_cmd rsync
   require_env_var ANYSCALE_CLI_TOKEN
   require_env_var ANYSCALE_CLOUD_NAME
+}
+
+workload_require_workspace_proof_inputs() {
+  workload_require_inputs
   [[ -f "${ROOT_DIR}/workloads/proofs/cpu_ray_proof.py" ]] || die "Missing workloads/proofs/cpu_ray_proof.py"
   [[ -f "${ROOT_DIR}/workloads/proofs/gpu_ray_proof.py" ]] || die "Missing workloads/proofs/gpu_ray_proof.py"
+}
+
+workload_require_pipeline_inputs() {
+  workload_require_inputs
+  require_cmd curl
+  require_cmd lsof
+  [[ -f "${ROOT_DIR}/workloads/proofs/build_train_serve_common.py" ]] || die "Missing workloads/proofs/build_train_serve_common.py"
+  [[ -f "${ROOT_DIR}/workloads/proofs/anyscale_build_cpu_job_proof.py" ]] || die "Missing workloads/proofs/anyscale_build_cpu_job_proof.py"
+  [[ -f "${ROOT_DIR}/workloads/proofs/anyscale_train_gpu_job_proof.py" ]] || die "Missing workloads/proofs/anyscale_train_gpu_job_proof.py"
+  [[ -f "${ROOT_DIR}/workloads/proofs/anyscale_serve_gpu_proof.py" ]] || die "Missing workloads/proofs/anyscale_serve_gpu_proof.py"
 }
 
 workload_prepare_stage() {
   workload_require_inputs
   ensure_deploy_e2e_bastion_access
+}
+
+workload_workspace_name_for_compute_config() {
+  local compute_config_name="$1"
+
+  case "${compute_config_name}" in
+    "${WORKLOAD_CPU_COMPUTE_CONFIG_NAME}")
+      printf '%s\n' "${WORKLOAD_CPU_WORKSPACE_NAME}"
+      ;;
+    "${WORKLOAD_GPU_COMPUTE_CONFIG_NAME}")
+      printf '%s\n' "${WORKLOAD_GPU_WORKSPACE_NAME}"
+      ;;
+    *)
+      die "No workload workspace is mapped to compute config ${compute_config_name}."
+      ;;
+  esac
+}
+
+workload_worker_node_prefix_for_compute_config() {
+  local compute_config_name="$1"
+
+  case "${compute_config_name}" in
+    "${WORKLOAD_CPU_COMPUTE_CONFIG_NAME}")
+      printf '%s\n' 'aks-cpu-'
+      ;;
+    "${WORKLOAD_GPU_COMPUTE_CONFIG_NAME}")
+      printf '%s\n' 'aks-gput4-'
+      ;;
+    *)
+      die "No worker-node prefix is mapped to compute config ${compute_config_name}."
+      ;;
+  esac
+}
+
+prepare_workload_submission_dir() {
+  local workspace_name="$1"
+  local worker_node_prefix="$2"
+  local remote_dir="$3"
+  local cli_bin proof_dir wait_log namespace head_pod
+
+  ensure_deploy_e2e_bastion_access
+
+  cli_bin="$(anyscale_cli_bin)"
+  proof_dir="${ROOT_DIR}/workloads/proofs"
+  wait_log="${SETUP_RUN_DIR}/${workspace_name}.wait.log"
+  namespace="${TF_VAR_anyscale_operator_namespace}"
+
+  ensure_workload_workspace_running "${workspace_name}" "${cli_bin}" "${wait_log}"
+  wait_for_workspace_runtime_stable "${workspace_name}" "${worker_node_prefix}" "${wait_log}"
+
+  head_pod="$(workspace_head_pod_name "${workspace_name}")"
+
+  log "Copying workload proof scripts to ${workspace_name} head pod ${head_pod}"
+  run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_WORKSPACE_COMMAND_SECONDS}" \
+    kubectl exec -n "${namespace}" -c ray "${head_pod}" -- \
+      bash -lc "mkdir -p '${remote_dir}'"
+  run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_WORKSPACE_COMMAND_SECONDS}" \
+    kubectl cp -n "${namespace}" -c ray \
+      "${proof_dir}/." \
+      "${head_pod}:${remote_dir}/"
+
+  WORKLOAD_LAST_HEAD_POD="${head_pod}"
 }
 
 workload_workspace_id() {
@@ -4899,7 +5003,36 @@ ensure_workload_workspace_running() {
   local workspace_name="$1"
   local cli_bin="$2"
   local wait_log="$3"
-  local start_output
+  local status_output workspace_status start_output
+
+  if status_output="$(run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS}" \
+    "${cli_bin}" workspace_v2 status \
+      --name "${workspace_name}" \
+      --cloud "${ANYSCALE_CLOUD_NAME}" 2>&1)"; then
+    workspace_status="$(normalize_anyscale_workspace_status "${status_output}")"
+    [[ -n "${workspace_status}" ]] || workspace_status="UNKNOWN"
+    printf '%s\n' "${status_output}" > "${wait_log}.status"
+
+    case "${workspace_status}" in
+      RUNNING)
+        log "Workspace ${workspace_name} is already RUNNING; skipping start to avoid churn."
+        printf '%s\n' "${workspace_status}" | tee "${wait_log}.start"
+        printf '%s\n' "${workspace_status}" | tee -a "${wait_log}"
+        return 0
+        ;;
+      STARTING)
+        log "Workspace ${workspace_name} is already STARTING; waiting for it to become RUNNING."
+        printf '%s\n' "${workspace_status}" | tee "${wait_log}.start"
+        ;;
+      CREATE_FAILED|FAILED|ERROR)
+        die "Workspace ${workspace_name} is unhealthy with API status ${workspace_status}."
+        ;;
+      TERMINATED|TERMINATING|UNKNOWN)
+        ;;
+    esac
+  else
+    printf '%s\n' "${status_output}" > "${wait_log}.status"
+  fi
 
   log "Starting or reusing workspace ${workspace_name}"
   if ! start_output="$(run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS}" \
@@ -4919,6 +5052,63 @@ ensure_workload_workspace_running() {
     die "Workspace ${workspace_name} did not reach RUNNING. See ${wait_log}."
   fi
   printf '%s\n' "${ANYSCALE_WORKSPACE_WAIT_RESULT}" | tee -a "${wait_log}"
+}
+
+release_workload_workspace_if_running() {
+  local workspace_name="$1"
+  local cli_bin="$2"
+  local wait_log="$3"
+  local status_output workspace_status terminate_output
+
+  if ! status_output="$(run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS}" \
+    "${cli_bin}" workspace_v2 status \
+      --name "${workspace_name}" \
+      --cloud "${ANYSCALE_CLOUD_NAME}" 2>&1)"; then
+    if grep -Eiq 'not found|does not exist' <<<"${status_output}"; then
+      log "Workspace ${workspace_name} does not exist; nothing to release."
+      return 0
+    fi
+    printf '%s\n' "${status_output}" | tee "${wait_log}.release-status"
+    die "Could not determine whether workspace ${workspace_name} is running. See ${wait_log}.release-status."
+  fi
+
+  workspace_status="$(normalize_anyscale_workspace_status "${status_output}")"
+  [[ -n "${workspace_status}" ]] || workspace_status="UNKNOWN"
+  printf '%s\n' "${status_output}" > "${wait_log}.release-status"
+
+  case "${workspace_status}" in
+    TERMINATED)
+      log "Workspace ${workspace_name} is already TERMINATED; nothing to release."
+      return 0
+      ;;
+    TERMINATING)
+      log "Workspace ${workspace_name} is already TERMINATING; waiting for it to finish releasing GPU capacity."
+      ;;
+    RUNNING|STARTING|PENDING|UPDATING|RESTARTING|RESUMING|STOPPING|UNKNOWN)
+      log "Terminating workspace ${workspace_name} to release compute for GPU proof jobs and services."
+      if ! terminate_output="$(run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS}" \
+        "${cli_bin}" workspace_v2 terminate \
+          --name "${workspace_name}" \
+          --cloud "${ANYSCALE_CLOUD_NAME}" 2>&1)"; then
+        printf '%s\n' "${terminate_output}" | tee "${wait_log}.release-terminate"
+        if ! grep -Eiq 'already.*terminated|currently in state: TERMINATED|currently in state: TERMINATING' <<<"${terminate_output}"; then
+          die "Workspace ${workspace_name} could not be terminated to release GPU capacity. See ${wait_log}.release-terminate."
+        fi
+      else
+        printf '%s\n' "${terminate_output}" | tee "${wait_log}.release-terminate"
+      fi
+      ;;
+    *)
+      die "Workspace ${workspace_name} is in unsupported state ${workspace_status} for release handling."
+      ;;
+  esac
+
+  if ! wait_for_anyscale_workspace_terminated_attempts "${workspace_name}" "${cli_bin}" "${wait_log}.release-wait" 30 20; then
+    printf '%s\n' "${ANYSCALE_WORKSPACE_WAIT_RESULT}" | tee -a "${wait_log}.release-wait"
+    die "Workspace ${workspace_name} did not reach TERMINATED while releasing GPU capacity. See ${wait_log}.release-wait."
+  fi
+
+  printf '%s\n' "${ANYSCALE_WORKSPACE_WAIT_RESULT}" | tee -a "${wait_log}.release-wait"
 }
 
 wait_for_workload_workspace_command_ready() {
@@ -5019,7 +5209,7 @@ run_workspace_proof() {
   local worker_node_prefix="$4"
   local cli_bin proof_dir output_log diagnostics_dir wait_log namespace head_pod remote_dir proof_exit
 
-  workload_require_inputs
+  workload_require_workspace_proof_inputs
   ensure_deploy_e2e_bastion_access
 
   cli_bin="$(anyscale_cli_bin)"
@@ -5060,6 +5250,398 @@ run_workspace_proof() {
   log "${workspace_name} printed ${success_marker}. Diagnostics: ${diagnostics_dir}"
 }
 
+extract_prefixed_value_from_log() {
+  local prefix="$1"
+  local log_file="$2"
+
+  awk -v prefix="${prefix}" '
+    index($0, prefix) == 1 { value = substr($0, length(prefix) + 1) }
+    END {
+      if (value != "") {
+        print value
+        exit 0
+      }
+      exit 1
+    }
+  ' "${log_file}"
+}
+
+run_anyscale_job_proof() {
+  local job_name="$1"
+  local compute_config_name="$2"
+  local script_name="$3"
+  local success_marker="$4"
+  shift 4
+
+  local cli_bin jobs_dir output_log status_log workspace_name worker_node_prefix
+  local remote_dir namespace head_pod env_file remote_env_path remote_command job_command job_exit
+  local -a job_cmd auth_env_specs
+
+  workload_require_pipeline_inputs
+
+  cli_bin="$(anyscale_cli_bin)"
+  jobs_dir="${SETUP_RUN_DIR}/jobs"
+  output_log="${jobs_dir}/${job_name}.out.log"
+  status_log="${jobs_dir}/${job_name}.status.json"
+  workspace_name="${WORKLOAD_CPU_WORKSPACE_NAME}"
+  worker_node_prefix='aks-cpu-'
+  remote_dir="/tmp/anyscale-proof-${job_name}"
+  namespace="${TF_VAR_anyscale_operator_namespace}"
+
+  mkdir -p "${jobs_dir}"
+
+  prepare_workload_submission_dir "${workspace_name}" "${worker_node_prefix}" "${remote_dir}"
+  head_pod="${WORKLOAD_LAST_HEAD_POD}"
+
+  auth_env_specs=(
+    "ANYSCALE_HOST=${ANYSCALE_HOST}"
+    "ANYSCALE_CLI_TOKEN=${ANYSCALE_CLI_TOKEN}"
+    "ANYSCALE_CLOUD_NAME=${ANYSCALE_CLOUD_NAME}"
+  )
+  env_file="${jobs_dir}/${job_name}.remote.env.sh"
+  remote_env_path="${remote_dir}/.anyscale-proof.env"
+  write_export_env_script "${env_file}" "${auth_env_specs[@]}"
+  run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_WORKSPACE_COMMAND_SECONDS}" \
+    kubectl cp -n "${namespace}" -c ray \
+      "${env_file}" \
+      "${head_pod}:${remote_env_path}"
+
+  job_cmd=(
+    anyscale job submit
+      --name "${job_name}"
+      --wait
+      --compute-config "${compute_config_name}"
+      --working-dir "${remote_dir}"
+      --cloud "${ANYSCALE_CLOUD_NAME}"
+  )
+
+  while [[ $# -gt 0 ]]; do
+    job_cmd+=(--env "$1")
+    shift
+  done
+
+  job_cmd+=(-- python "${script_name}")
+  job_command="$(shell_join "${job_cmd[@]}")"
+  remote_command="$(cat <<EOF
+set -euo pipefail
+source $(shell_join "${remote_env_path}")
+cd $(shell_join "${remote_dir}")
+${job_command}
+EOF
+)"
+
+  log "Submitting Anyscale job proof ${job_name} on compute config ${compute_config_name} from ${workspace_name} head pod ${head_pod}"
+  job_exit=0
+  set +e
+  run_with_timeout "${WORKLOAD_COMMAND_TIMEOUT_SECONDS}" \
+    kubectl exec -n "${namespace}" -c ray "${head_pod}" -- \
+      bash -lc "${remote_command}" 2>&1 | tee "${output_log}"
+  job_exit=${PIPESTATUS[0]}
+  set -e
+
+  run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS}" \
+    "${cli_bin}" job status \
+      --name "${job_name}" \
+      --cloud "${ANYSCALE_CLOUD_NAME}" \
+      --json \
+      --verbose \
+      --include-archived \
+    > "${status_log}" 2>&1 || true
+
+  WORKLOAD_LAST_JOB_OUTPUT_LOG="${output_log}"
+  WORKLOAD_LAST_JOB_STATUS_LOG="${status_log}"
+
+  [[ "${job_exit}" -eq 0 ]] || die "Job proof ${job_name} failed. See ${output_log} and ${status_log}."
+  grep -q "${success_marker}" "${output_log}" || die "Job proof ${job_name} did not print ${success_marker}. See ${output_log}."
+  log "Job ${job_name} printed ${success_marker}. Status: ${status_log}"
+}
+
+extract_anyscale_service_url() {
+  local status_file="$1"
+  local service_url
+
+  service_url="$(jq -r '.. | strings | select(test("^https?://"))' "${status_file}" | grep -E 'serve-session-|session-' | head -n1 || true)"
+  if [[ -z "${service_url}" ]]; then
+    service_url="$(jq -r '.. | strings | select(test("^https?://"))' "${status_file}" | head -n1 || true)"
+  fi
+
+  [[ -n "${service_url}" ]] || return 1
+  printf '%s\n' "${service_url}"
+}
+
+wait_for_anyscale_service_ready() {
+  local cli_bin="$1"
+  local service_name="$2"
+  local cloud_name="$3"
+  local timeout_seconds="$4"
+  local wait_log="$5"
+  local status_log="$6"
+  local start_epoch current_epoch service_state primary_version_state tmp_status_log
+
+  start_epoch="$(date +%s)"
+  : > "${wait_log}"
+
+  while true; do
+    tmp_status_log="${status_log}.tmp"
+    if run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS}" \
+      "${cli_bin}" service status \
+        --name "${service_name}" \
+        --cloud "${cloud_name}" \
+        --json \
+        --verbose \
+      > "${tmp_status_log}" 2>&1; then
+      mv "${tmp_status_log}" "${status_log}"
+      service_state="$(jq -r '.state // ""' "${status_log}")"
+      primary_version_state="$(jq -r '.primary_version.state // ""' "${status_log}")"
+      printf 'service_state=%s primary_version_state=%s\n' "${service_state}" "${primary_version_state}" | tee -a "${wait_log}"
+      if [[ "${service_state}" == "RUNNING" || "${primary_version_state}" == "RUNNING" ]]; then
+        return 0
+      fi
+    else
+      if [[ -f "${tmp_status_log}" ]]; then
+        cat "${tmp_status_log}" >> "${wait_log}"
+        mv "${tmp_status_log}" "${status_log}"
+      fi
+    fi
+
+    current_epoch="$(date +%s)"
+    if (( current_epoch - start_epoch >= timeout_seconds )); then
+      die "Service ${service_name} did not reach a ready state within ${timeout_seconds}s. See ${wait_log} and ${status_log}."
+    fi
+
+    sleep 10
+  done
+}
+
+service_url_host() {
+  local service_url="$1"
+  local host
+
+  host="${service_url#https://}"
+  host="${host#http://}"
+  printf '%s\n' "${host%%/*}"
+}
+
+service_url_path() {
+  local service_url="$1"
+  local path
+
+  path="${service_url#https://}"
+  path="${path#http://}"
+  if [[ "${path}" == */* ]]; then
+    printf '/%s\n' "${path#*/}"
+  else
+    printf '/\n'
+  fi
+}
+
+curl_anyscale_service_via_head_pod() {
+  local method="$1"
+  local service_name="$2"
+  local service_url="$3"
+  local request_body="$4"
+  local response_file="$5"
+  local stderr_file="$6"
+  local tunnel_log="$7"
+  local namespace service_path pod_list pod curl_exit request_body_b64
+
+  namespace="${TF_VAR_anyscale_operator_namespace:-anyscale-operator}"
+  service_path="$(service_url_path "${service_url}")"
+  [[ -n "${service_path}" ]] || service_path='/'
+
+  : > "${tunnel_log}"
+  pod_list="$(kubectl get pods \
+    -n "${namespace}" \
+    -l "app.kubernetes.io/name=${service_name},ray-node-type=head" \
+    --field-selector=status.phase=Running \
+    --sort-by=.metadata.creationTimestamp \
+    -o name 2>> "${tunnel_log}" | sed 's#pod/##')"
+  [[ -n "${pod_list}" ]] || return 1
+
+  request_body_b64="$(printf '%s' "${request_body}" | base64 | tr -d '\n')"
+
+  while IFS= read -r pod; do
+    [[ -n "${pod}" ]] || continue
+    printf 'Trying service head pod %s\n' "${pod}" >> "${tunnel_log}"
+
+    curl_exit=0
+    set +e
+    if [[ "${method}" == "GET" ]]; then
+      kubectl exec -n "${namespace}" -c ray "${pod}" -- \
+        curl -sfS "http://127.0.0.1:8000${service_path}" \
+        > "${response_file}" 2>> "${stderr_file}"
+      curl_exit=$?
+    else
+      kubectl exec -n "${namespace}" -c ray "${pod}" -- sh -lc \
+        "printf %s \"${request_body_b64}\" | base64 -d >/tmp/anyscale-service-proof-request.json && curl -sfS -H \"Content-Type: application/json\" --data-binary @/tmp/anyscale-service-proof-request.json \"http://127.0.0.1:8000${service_path}\"" \
+        > "${response_file}" 2>> "${stderr_file}"
+      curl_exit=$?
+    fi
+    set -e
+
+    if [[ "${curl_exit}" -eq 0 ]]; then
+      printf 'Service head pod request succeeded via %s\n' "${pod}" >> "${tunnel_log}"
+      return 0
+    fi
+
+    printf 'Service head pod request via %s failed with exit code %s\n' "${pod}" "${curl_exit}" >> "${tunnel_log}"
+  done <<< "${pod_list}"
+
+  return 1
+}
+
+curl_anyscale_service_endpoint() {
+  local method="$1"
+  local service_name="$2"
+  local service_url="$3"
+  local request_body="$4"
+  local response_file="$5"
+  local stderr_file="$6"
+  local tunnel_log="$7"
+  local query_auth_token="$8"
+  local curl_exit
+  local -a auth_header=()
+
+  if [[ -n "${query_auth_token}" ]]; then
+    auth_header=(-H "Authorization: Bearer ${query_auth_token}")
+  fi
+
+  curl_exit=0
+  set +e
+  if [[ "${method}" == "GET" ]]; then
+    curl -fSs "${auth_header[@]}" "${service_url}" -o "${response_file}" 2> "${stderr_file}"
+    curl_exit=$?
+  else
+    curl -fSs \
+      -X "${method}" \
+      "${auth_header[@]}" \
+      -H 'Content-Type: application/json' \
+      --data "${request_body}" \
+      "${service_url}" \
+      -o "${response_file}" 2> "${stderr_file}"
+    curl_exit=$?
+  fi
+  set -e
+
+  if [[ "${curl_exit}" -eq 0 ]]; then
+    return 0
+  fi
+
+  warn "Direct request to ${service_url} failed; retrying from a service head pod inside the AKS cluster."
+  curl_anyscale_service_via_head_pod "${method}" "${service_name}" "${service_url}" "${request_body}" "${response_file}" "${stderr_file}" "${tunnel_log}"
+}
+
+run_anyscale_service_proof() {
+  local service_name="$1"
+  local compute_config_name="$2"
+  local import_path="$3"
+  local success_marker="$4"
+  local model_json="$5"
+  local cli_bin services_dir deploy_log wait_log status_log service_url_file
+  local health_log positive_log negative_log stderr_log tunnel_log service_url
+  local service_auth_token
+  local positive_payload negative_payload positive_expected negative_expected deploy_exit
+  local workspace_name worker_node_prefix remote_dir namespace head_pod env_file remote_env_path
+  local deploy_command remote_command
+  local -a auth_env_specs
+
+  workload_require_pipeline_inputs
+
+  cli_bin="$(anyscale_cli_bin)"
+  services_dir="${SETUP_RUN_DIR}/services"
+  deploy_log="${services_dir}/${service_name}.deploy.log"
+  wait_log="${services_dir}/${service_name}.wait.log"
+  status_log="${services_dir}/${service_name}.status.json"
+  service_url_file="${services_dir}/${service_name}.url.txt"
+  health_log="${services_dir}/${service_name}.health.json"
+  positive_log="${services_dir}/${service_name}.predict-positive.json"
+  negative_log="${services_dir}/${service_name}.predict-negative.json"
+  stderr_log="${services_dir}/${service_name}.curl.stderr.log"
+  tunnel_log="${services_dir}/${service_name}.tunnel.log"
+
+  mkdir -p "${services_dir}"
+
+  positive_payload="$(printf '%s' "${model_json}" | jq -c '.probes.positive | {x1, x2}')"
+  negative_payload="$(printf '%s' "${model_json}" | jq -c '.probes.negative | {x1, x2}')"
+  positive_expected="$(printf '%s' "${model_json}" | jq -r '.probes.positive.expected_label')"
+  negative_expected="$(printf '%s' "${model_json}" | jq -r '.probes.negative.expected_label')"
+
+  workspace_name="${WORKLOAD_CPU_WORKSPACE_NAME}"
+  worker_node_prefix='aks-cpu-'
+  remote_dir="/tmp/anyscale-proof-${service_name}"
+  namespace="${TF_VAR_anyscale_operator_namespace}"
+
+  prepare_workload_submission_dir "${workspace_name}" "${worker_node_prefix}" "${remote_dir}"
+  head_pod="${WORKLOAD_LAST_HEAD_POD}"
+
+  auth_env_specs=(
+    "ANYSCALE_HOST=${ANYSCALE_HOST}"
+    "ANYSCALE_CLI_TOKEN=${ANYSCALE_CLI_TOKEN}"
+    "ANYSCALE_CLOUD_NAME=${ANYSCALE_CLOUD_NAME}"
+  )
+  env_file="${services_dir}/${service_name}.remote.env.sh"
+  remote_env_path="${remote_dir}/.anyscale-proof.env"
+  write_export_env_script "${env_file}" "${auth_env_specs[@]}"
+  run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_WORKSPACE_COMMAND_SECONDS}" \
+    kubectl cp -n "${namespace}" -c ray \
+      "${env_file}" \
+      "${head_pod}:${remote_env_path}"
+
+  deploy_command="$(shell_join \
+    anyscale service deploy \
+      --name "${service_name}" \
+      --compute-config "${compute_config_name}" \
+      --working-dir "${remote_dir}" \
+      --cloud "${ANYSCALE_CLOUD_NAME}" \
+      --env 'ANYSCALE_PROOF_USE_GPU=1' \
+      --env "GPU_TRAIN_MODEL_JSON=${model_json}" \
+      "${import_path}")"
+  remote_command="$(cat <<EOF
+set -euo pipefail
+source $(shell_join "${remote_env_path}")
+cd $(shell_join "${remote_dir}")
+${deploy_command}
+EOF
+)"
+
+  log "Deploying Anyscale service proof ${service_name} on compute config ${compute_config_name} from ${workspace_name} head pod ${head_pod}"
+  deploy_exit=0
+  set +e
+  run_with_timeout "${WORKLOAD_COMMAND_TIMEOUT_SECONDS}" \
+    kubectl exec -n "${namespace}" -c ray "${head_pod}" -- \
+      bash -lc "${remote_command}" 2>&1 | tee "${deploy_log}"
+  deploy_exit=${PIPESTATUS[0]}
+  set -e
+  [[ "${deploy_exit}" -eq 0 ]] || die "Service proof ${service_name} deploy failed. See ${deploy_log}."
+
+  wait_for_anyscale_service_ready \
+    "${cli_bin}" \
+    "${service_name}" \
+    "${ANYSCALE_CLOUD_NAME}" \
+    "${WORKLOAD_COMMAND_TIMEOUT_SECONDS}" \
+    "${wait_log}" \
+    "${status_log}"
+
+  service_url="$(extract_anyscale_service_url "${status_log}")" || die "Could not find a service URL in ${status_log}."
+  service_auth_token="$(jq -r '.query_auth_token // ""' "${status_log}")"
+  printf '%s\n' "${service_url}" > "${service_url_file}"
+
+  curl_anyscale_service_endpoint GET "${service_name}" "${service_url}" '' "${health_log}" "${stderr_log}" "${tunnel_log}" "${service_auth_token}"
+  jq -e --arg marker "${success_marker}" '.marker == $marker and (.metrics.accuracy // 0) >= 0.99' "${health_log}" >/dev/null \
+    || die "Service proof ${service_name} health response was unexpected. See ${health_log}."
+
+  curl_anyscale_service_endpoint POST "${service_name}" "${service_url}" "${positive_payload}" "${positive_log}" "${stderr_log}" "${tunnel_log}" "${service_auth_token}"
+  jq -e --arg marker "${success_marker}" --argjson expected "${positive_expected}" '.marker == $marker and .label == $expected' "${positive_log}" >/dev/null \
+    || die "Service proof ${service_name} positive prediction was unexpected. See ${positive_log}."
+
+  curl_anyscale_service_endpoint POST "${service_name}" "${service_url}" "${negative_payload}" "${negative_log}" "${stderr_log}" "${tunnel_log}" "${service_auth_token}"
+  jq -e --arg marker "${success_marker}" --argjson expected "${negative_expected}" '.marker == $marker and .label == $expected' "${negative_log}" >/dev/null \
+    || die "Service proof ${service_name} negative prediction was unexpected. See ${negative_log}."
+
+  WORKLOAD_LAST_SERVICE_STATUS_LOG="${status_log}"
+  log "Service ${service_name} printed ${success_marker}. URL: ${service_url}. Diagnostics: ${services_dir}"
+}
+
 workload_cpu_stage() {
   run_workspace_proof "${WORKLOAD_CPU_WORKSPACE_NAME}" "cpu_ray_proof.py" "CPU_RAY_PROOF_OK" "aks-cpu-"
 }
@@ -5068,29 +5650,118 @@ workload_gpu_stage() {
   run_workspace_proof "${WORKLOAD_GPU_WORKSPACE_NAME}" "gpu_ray_proof.py" "GPU_RAY_PROOF_OK" "aks-gput4-"
 }
 
+workload_build_manifest_file() {
+  printf '%s\n' "${SETUP_RUN_DIR}/jobs/${WORKLOAD_BUILD_JOB_NAME}.manifest.json"
+}
+
+workload_train_model_file() {
+  printf '%s\n' "${SETUP_RUN_DIR}/jobs/${WORKLOAD_TRAIN_JOB_NAME}.model.json"
+}
+
+workload_name_with_run_suffix() {
+  local base_name="$1"
+  local run_suffix
+
+  run_suffix="$(basename "${SETUP_RUN_DIR}")"
+  run_suffix="${run_suffix%%-*}"
+  run_suffix="${run_suffix//[!0-9]/}"
+
+  printf '%s-%s\n' "${base_name}" "${run_suffix}"
+}
+
+workload_build_stage() {
+  local manifest_file
+
+  run_anyscale_job_proof \
+    "${WORKLOAD_BUILD_JOB_NAME}" \
+    "${WORKLOAD_CPU_COMPUTE_CONFIG_NAME}" \
+    "anyscale_build_cpu_job_proof.py" \
+    "CPU_BUILD_JOB_PROOF_OK"
+
+  manifest_file="$(workload_build_manifest_file)"
+  WORKLOAD_BUILD_MANIFEST_JSON="$(extract_prefixed_value_from_log 'CPU_BUILD_MANIFEST_JSON=' "${WORKLOAD_LAST_JOB_OUTPUT_LOG}")" \
+    || die "Build job proof did not emit CPU_BUILD_MANIFEST_JSON=. See ${WORKLOAD_LAST_JOB_OUTPUT_LOG}."
+  printf '%s\n' "${WORKLOAD_BUILD_MANIFEST_JSON}" > "${manifest_file}"
+}
+
+workload_train_stage() {
+  local manifest_file model_file
+
+  workload_require_pipeline_inputs
+
+  manifest_file="$(workload_build_manifest_file)"
+  if [[ -z "${WORKLOAD_BUILD_MANIFEST_JSON:-}" && -f "${manifest_file}" ]]; then
+    WORKLOAD_BUILD_MANIFEST_JSON="$(tr -d '\n' < "${manifest_file}")"
+  fi
+  [[ -n "${WORKLOAD_BUILD_MANIFEST_JSON:-}" ]] || die "Build manifest is missing; run the build proof stage before the train proof stage."
+
+  log "Keeping workspace ${WORKLOAD_GPU_WORKSPACE_NAME} running; GPU job and service proofs will rely on AKS autoscaling for additional capacity."
+
+  run_anyscale_job_proof \
+    "${WORKLOAD_TRAIN_JOB_NAME}" \
+    "${WORKLOAD_GPU_COMPUTE_CONFIG_NAME}" \
+    "anyscale_train_gpu_job_proof.py" \
+    "GPU_TRAIN_JOB_PROOF_OK" \
+    'ANYSCALE_PROOF_USE_GPU=1' \
+    "CPU_BUILD_MANIFEST_JSON=${WORKLOAD_BUILD_MANIFEST_JSON}"
+
+  model_file="$(workload_train_model_file)"
+  WORKLOAD_TRAIN_MODEL_JSON="$(extract_prefixed_value_from_log 'GPU_TRAIN_MODEL_JSON=' "${WORKLOAD_LAST_JOB_OUTPUT_LOG}")" \
+    || die "Train job proof did not emit GPU_TRAIN_MODEL_JSON=. See ${WORKLOAD_LAST_JOB_OUTPUT_LOG}."
+  printf '%s\n' "${WORKLOAD_TRAIN_MODEL_JSON}" > "${model_file}"
+}
+
+workload_service_stage() {
+  local model_file
+
+  model_file="$(workload_train_model_file)"
+  if [[ -z "${WORKLOAD_TRAIN_MODEL_JSON:-}" && -f "${model_file}" ]]; then
+    WORKLOAD_TRAIN_MODEL_JSON="$(tr -d '\n' < "${model_file}")"
+  fi
+  [[ -n "${WORKLOAD_TRAIN_MODEL_JSON:-}" ]] || die "Train model payload is missing; run the train proof stage before the service proof stage."
+
+  run_anyscale_service_proof \
+    "${WORKLOAD_SERVICE_NAME}" \
+    "${WORKLOAD_GPU_COMPUTE_CONFIG_NAME}" \
+    'anyscale_serve_gpu_proof:app' \
+    "GPU_SERVE_SERVICE_PROOF_OK" \
+    "${WORKLOAD_TRAIN_MODEL_JSON}"
+}
+
 workload() {
   local subcommand="${1:-}"
   local target="${2:-}"
   WORKLOAD_CPU_WORKSPACE_NAME="aks-cpu-workspace"
   WORKLOAD_GPU_WORKSPACE_NAME="aks-gpu-workspace"
+  WORKLOAD_CPU_COMPUTE_CONFIG_NAME="aks-cpu"
+  WORKLOAD_GPU_COMPUTE_CONFIG_NAME="aks-gpu"
+  WORKLOAD_BUILD_JOB_BASENAME="aks-cpu-build-proof"
+  WORKLOAD_TRAIN_JOB_BASENAME="aks-gpu-train-proof"
+  WORKLOAD_SERVICE_BASENAME="aks-gpu-serve-proof"
+  WORKLOAD_BUILD_JOB_NAME="${WORKLOAD_BUILD_JOB_BASENAME}"
+  WORKLOAD_TRAIN_JOB_NAME="${WORKLOAD_TRAIN_JOB_BASENAME}"
+  WORKLOAD_SERVICE_NAME="${WORKLOAD_SERVICE_BASENAME}"
   WORKLOAD_COMMAND_TIMEOUT_SECONDS="${ANYSCALE_WORKSPACE_PROOF_COMMAND_TIMEOUT_SECONDS:-900}"
+  WORKLOAD_BUILD_MANIFEST_JSON=""
+  WORKLOAD_TRAIN_MODEL_JSON=""
 
   if [[ "${subcommand}" == "--help" || "${subcommand}" == "-h" || -z "${subcommand}" ]]; then
     cat <<'USAGE'
 Usage:
   ./scripts/setup.sh workload proof cpu
   ./scripts/setup.sh workload proof gpu
+  ./scripts/setup.sh workload proof pipeline
   ./scripts/setup.sh workload proof all
 
-Runs deterministic Ray workload proofs in the durable Anyscale workspaces and
-writes Anyscale workspace logs plus AKS pod/operator/event diagnostics into the
-run directory.
+Runs deterministic Ray workload proofs in the durable Anyscale workspaces plus
+a lightweight build/train/serve pipeline that uses the Anyscale job and service
+APIs across the CPU and GPU compute pools.
 USAGE
     return 0
   fi
 
-  [[ "${subcommand}" == "proof" ]] || die "Usage: ./scripts/setup.sh workload proof {cpu|gpu|all}"
-  [[ -n "${target}" ]] || die "Usage: ./scripts/setup.sh workload proof {cpu|gpu|all}"
+  [[ "${subcommand}" == "proof" ]] || die "Usage: ./scripts/setup.sh workload proof {cpu|gpu|pipeline|all}"
+  [[ -n "${target}" ]] || die "Usage: ./scripts/setup.sh workload proof {cpu|gpu|pipeline|all}"
   shift 2
 
   while [[ $# -gt 0 ]]; do
@@ -5114,7 +5785,7 @@ USAGE
       --help|-h)
         cat <<'USAGE'
 Usage:
-  ./scripts/setup.sh workload proof {cpu|gpu|all} [--command-timeout-seconds N]
+  ./scripts/setup.sh workload proof {cpu|gpu|pipeline|all} [--command-timeout-seconds N]
 
 Options:
   --cpu-workspace-name NAME     Default: aks-cpu-workspace
@@ -5140,11 +5811,27 @@ USAGE
       run_stage "prepare" workload_prepare_stage
       run_stage "gpu-proof" workload_gpu_stage
       ;;
+    pipeline)
+      setup_run_init "workload-pipeline" 4
+      WORKLOAD_BUILD_JOB_NAME="$(workload_name_with_run_suffix "${WORKLOAD_BUILD_JOB_BASENAME}")"
+      WORKLOAD_TRAIN_JOB_NAME="$(workload_name_with_run_suffix "${WORKLOAD_TRAIN_JOB_BASENAME}")"
+      WORKLOAD_SERVICE_NAME="$(workload_name_with_run_suffix "${WORKLOAD_SERVICE_BASENAME}")"
+      run_stage "prepare" workload_prepare_stage
+      run_stage "build-job-proof" workload_build_stage
+      run_stage "train-job-proof" workload_train_stage
+      run_stage "serve-service-proof" workload_service_stage
+      ;;
     all)
-      setup_run_init "workload-all" 3
+      setup_run_init "workload-all" 6
+      WORKLOAD_BUILD_JOB_NAME="$(workload_name_with_run_suffix "${WORKLOAD_BUILD_JOB_BASENAME}")"
+      WORKLOAD_TRAIN_JOB_NAME="$(workload_name_with_run_suffix "${WORKLOAD_TRAIN_JOB_BASENAME}")"
+      WORKLOAD_SERVICE_NAME="$(workload_name_with_run_suffix "${WORKLOAD_SERVICE_BASENAME}")"
       run_stage "prepare" workload_prepare_stage
       run_stage "cpu-proof" workload_cpu_stage
       run_stage "gpu-proof" workload_gpu_stage
+      run_stage "build-job-proof" workload_build_stage
+      run_stage "train-job-proof" workload_train_stage
+      run_stage "serve-service-proof" workload_service_stage
       ;;
     *)
       die "Unknown workload proof target: ${target}"
@@ -5158,7 +5845,7 @@ USAGE
 post() {
   log "Use ./scripts/setup.sh deploy to reconcile Terraform, Bastion-backed bootstrap, Anyscale platform registration, and durable CPU/GPU workspaces."
   log "Use ./scripts/setup.sh verify --full for static and live validation."
-  log "Use ./scripts/setup.sh workload proof all for deterministic CPU/GPU Ray workload proof plus Anyscale and AKS diagnostics."
+  log "Use ./scripts/setup.sh workload proof all for deterministic CPU/GPU workspace proofs plus the Anyscale CPU-build/GPU-train/GPU-serve pipeline."
   log "Use ./scripts/setup.sh teardown for Terraform-backed teardown, or ./scripts/setup.sh teardown --force --yes for explicit resource-group deletion."
 }
 
@@ -5168,14 +5855,55 @@ functional_test() {
 
 ###############################################################################
 destroy() {
+  local cluster_bootstrap_json destroy_postcheck_error="" remaining_state remaining_state_file resource_group terraform_exit_code
+
   render_tfvars
+  resource_group="$(resource_group_name)"
   warn "Destroying ALL resources in the workspace."
   read -r -p "Type the project name to confirm destroy: " confirm
   [[ "${confirm}" == "${TF_VAR_project}" ]] || die "Cancelled."
+
+  force_teardown_drain_anyscale_cloud
   ensure_deploy_e2e_bastion_access
-  export TF_VAR_cluster_bootstrap="{\"kubeconfig_path\":\"${KUBECONFIG}\"}"
-  run_with_timeout "${SETUP_TIMEOUT_TERRAFORM_DESTROY_SECONDS}" terraform destroy -auto-approve
+
+  cluster_bootstrap_json="${TF_VAR_cluster_bootstrap:-{}}"
+  if ! jq -e . >/dev/null 2>&1 <<<"${cluster_bootstrap_json}"; then
+    cluster_bootstrap_json="{}"
+  fi
+  export TF_VAR_cluster_bootstrap
+  TF_VAR_cluster_bootstrap="$(jq -cn \
+    --argjson cluster_bootstrap "${cluster_bootstrap_json}" \
+    --arg kubeconfig_path "${KUBECONFIG}" \
+    '$cluster_bootstrap + {kubeconfig_path: $kubeconfig_path}')"
+
+  terraform_exit_code=0
+  set +e
+  run_with_timeout "${SETUP_TIMEOUT_TERRAFORM_DESTROY_SECONDS}" \
+    terraform destroy -auto-approve -var="cluster_bootstrap=${TF_VAR_cluster_bootstrap}"
+  terraform_exit_code=$?
+  set -e
+
+  if (( terraform_exit_code != 0 )); then
+    destroy_postcheck_error="Terraform destroy failed with exit code ${terraform_exit_code}."
+  fi
+
+  remaining_state_file="${SETUP_RUN_DIR}/terraform-state-after-destroy.txt"
+  if remaining_state="$(terraform state list 2>/dev/null)" && [[ -n "${remaining_state}" ]]; then
+    printf '%s\n' "${remaining_state}" > "${remaining_state_file}"
+    if [[ -n "${destroy_postcheck_error}" ]]; then
+      destroy_postcheck_error="${destroy_postcheck_error} Terraform state still contains resources. See ${remaining_state_file}."
+    else
+      destroy_postcheck_error="Terraform destroy returned, but state still contains resources. See ${remaining_state_file}."
+    fi
+  elif (( terraform_exit_code == 0 )); then
+    log "Waiting for ${resource_group} deletion to complete"
+    wait_for_resource_group_deletion "${resource_group}"
+  fi
+
+  bastion_tunnel stop >/dev/null 2>&1 || true
   clear_anyscale_cloud_deployment_id
+
+  [[ -z "${destroy_postcheck_error}" ]] || die "${destroy_postcheck_error}"
 }
 
 force_teardown_drain_anyscale_cloud() {
@@ -5189,7 +5917,6 @@ force_teardown_drain_anyscale_cloud() {
 
   require_cmd az
   require_cmd jq
-  require_env_var ANYSCALE_CLI_TOKEN
 
   local cloud_arm_id subscription_id
   cloud_arm_id="${ANYSCALE_CLOUD_ARM_ID:-$(default_anyscale_cloud_arm_id)}"
@@ -5208,13 +5935,31 @@ force_teardown_drain_anyscale_cloud() {
     return 0
   fi
 
-  log "Draining Anyscale cloud before force resource-group deletion: ${ANYSCALE_CLOUD_NAME}"
+  require_env_var ANYSCALE_CLI_TOKEN
+
+  log "Draining Anyscale cloud before Azure teardown: ${ANYSCALE_CLOUD_NAME}"
   SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS="${SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS}" \
     SETUP_TIMEOUT_AZURE_COMMAND_SECONDS="${SETUP_TIMEOUT_AZURE_COMMAND_SECONDS}" \
     run_with_timeout 2400 \
       "${ANYSCALE_CLOUD_TEARDOWN_SCRIPT}" \
       --timeout-seconds 1800 \
       --poll-interval-seconds 20
+}
+
+wait_for_resource_group_deletion() {
+  local resource_group="$1"
+  local max_attempts="${2:-180}"
+  local attempt=1
+
+  while (( attempt <= max_attempts )); do
+    if [[ "$(az group exists --name "${resource_group}" --output tsv --only-show-errors 2>/dev/null || printf 'true')" == "false" ]]; then
+      return 0
+    fi
+    sleep 10
+    ((attempt++))
+  done
+
+  die "Timed out waiting for resource group ${resource_group} to delete. Check Azure activity logs and retry."
 }
 
 ###############################################################################
@@ -5265,19 +6010,7 @@ USAGE
     warn "Deleting resource group ${resource_group}"
     az group delete --name "${resource_group}" --yes --no-wait --only-show-errors
     log "Waiting for ${resource_group} deletion to complete"
-    local max_attempts=180
-    local attempt=1
-    while (( attempt <= max_attempts )); do
-      if [[ "$(az group exists --name "${resource_group}" --output tsv --only-show-errors 2>/dev/null || printf 'true')" == "false" ]]; then
-        break
-      fi
-      sleep 10
-      ((attempt++))
-    done
-
-    if (( attempt > max_attempts )); then
-      die "Timed out waiting for resource group ${resource_group} to delete. Check Azure activity logs and retry."
-    fi
+    wait_for_resource_group_deletion "${resource_group}"
   else
     log "Resource group ${resource_group} is already absent."
   fi
@@ -5390,7 +6123,7 @@ idempotency_run_stage() {
   printf '[idempotency] %s started\n' "${stage_name}"
 
   set +e
-  ( "$@" ) 2>&1 | tee "${log_file}"
+  ( set -e; "$@" ) 2>&1 | tee "${log_file}"
   exit_code=${PIPESTATUS[0]}
   set -e
 
