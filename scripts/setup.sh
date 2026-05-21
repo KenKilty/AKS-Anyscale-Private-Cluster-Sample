@@ -5172,7 +5172,8 @@ destroy() {
   warn "Destroying ALL resources in the workspace."
   read -r -p "Type the project name to confirm destroy: " confirm
   [[ "${confirm}" == "${TF_VAR_project}" ]] || die "Cancelled."
-  bastion_tunnel stop >/dev/null 2>&1 || true
+  ensure_deploy_e2e_bastion_access
+  export TF_VAR_cluster_bootstrap="{\"kubeconfig_path\":\"${KUBECONFIG}\"}"
   run_with_timeout "${SETUP_TIMEOUT_TERRAFORM_DESTROY_SECONDS}" terraform destroy -auto-approve
   clear_anyscale_cloud_deployment_id
 }

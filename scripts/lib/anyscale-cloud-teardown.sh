@@ -93,7 +93,12 @@ list_workspaces_json() {
 
   normalize_json_array_output "$({
     run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS}" \
-      "${cli_bin}" workspace_v2 list -j --no-interactive --include-archived --max-items 500
+      "${cli_bin}" workspace_v2 list \
+        -j \
+        --no-interactive \
+        --include-archived \
+        --max-items 500 \
+        --cloud "${ANYSCALE_CLOUD_NAME}"
   })"
 }
 

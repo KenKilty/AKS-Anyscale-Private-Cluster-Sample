@@ -119,6 +119,35 @@ The generated diagnostics include Anyscale workspace log tails and downloadable 
 
 You can still use the Anyscale console for manual inspection. The expected end state is that `aks-cpu-workspace` and `aks-gpu-workspace` are `RUNNING`, `aks-cpu-workspace` can run Ray CPU tasks, and `aks-gpu-workspace` can run Ray tasks requiring `num_gpus=1` with `CUDA_VISIBLE_DEVICES` set.
 
+## Using custom Ray images
+
+Anyscale only supports customizing the Ray container image for workload pods, you cannot customize the other sidecars today.
+
+The private ACR created by `module.acr` has `public_network_access_enabled = false` and is reachable only through its private endpoint inside the workload VNet, so `docker push` from a local workstation cannot reach it. The supported path for landing a Ray image in the private ACR is `az acr import`, which copies the image directly between the source registry and ACR over the Azure control plane and does not require any data-plane network access from your workstation.
+
+A typical import of a public Anyscale Ray image looks like this:
+
+```bash
+ACR_NAME=$(terraform -chdir=infra/terraform output -raw acr_login_server | cut -d. -f1)
+RG=$(terraform -chdir=infra/terraform output -raw resource_group_name)
+
+az acr import \
+  --name "$ACR_NAME" \
+  --resource-group "$RG" \
+  --source docker.io/anyscale/ray:2.55.1-slim-py312-cu129 \
+  --image anyscale/ray:2.55.1-slim-py312-cu129
+```
+
+If the import returns a `429` or `toomanyrequests` error from the source registry, pass Docker credentials with `--username <user> --password <token>` (a Docker Hub Personal Access Token works) to retry against the authenticated quota instead of the anonymous per-IP bucket.
+
+After the import completes, the image lives inside the private VNet at `<acr_login_server>/<image>:<tag>`. For the example above that resolves to a URI of the form:
+
+```
+<acr_login_server>/anyscale/ray:2.55.1-slim-py312-cu129
+```
+
+Confirm the upload with `az acr repository show-tags --name "$ACR_NAME" --repository anyscale/ray`. The AKS kubelet identity already has `AcrPull` on this registry (wired in `infra/terraform/main.tf`), so workspaces and workloads can reference the URI directly with no `imagePullSecret`. Point the Anyscale workspace or compute-config container image setting at that URI to roll out the custom Ray image.
+
 ## Validate the codebase and the deployed environment
 
 There are three validation levels in this repository. `verify --static` runs formatting, Terraform validation, and the plan-time Terraform tests. `verify --live` checks the deployed Azure, AKS, Anyscale operator, workspace, and focused Kubernetes path through Bastion. `verify --full` runs both.
