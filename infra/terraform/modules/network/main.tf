@@ -89,6 +89,15 @@ resource "azurerm_subnet" "bastion" {
   address_prefixes     = [var.subnet_cidrs.bastion]
 }
 
+resource "azurerm_subnet" "gateway" {
+  count = try(var.subnet_cidrs.gateway, null) == null ? 0 : 1
+
+  name                 = var.subnet_names.gateway # must be "GatewaySubnet"
+  resource_group_name  = var.resource_group_name
+  virtual_network_name = azurerm_virtual_network.this.name
+  address_prefixes     = [var.subnet_cidrs.gateway]
+}
+
 ###############################################################################
 # NSGs (workload subnets only — AzureFirewall/Bastion subnets must NOT have NSGs
 # in the case of AzureFirewallSubnet, and AzureBastionSubnet has NSG rules

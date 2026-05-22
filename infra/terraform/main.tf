@@ -29,6 +29,7 @@ module "network" {
     private_endpoints = local.names.subnet_private_endpoints
     firewall          = local.names.subnet_firewall
     bastion           = local.names.subnet_bastion
+    gateway           = local.names.subnet_gateway
   }
 
   nsg_aks_nodes_name = local.names.nsg_aks_nodes
@@ -181,6 +182,30 @@ resource "azurerm_virtual_network_dns_servers" "workload" {
 }
 
 ###############################################################################
+# Optional Azure VPN Gateway (P2S certificate-auth for operator client access)
+###############################################################################
+module "vpn" {
+  source = "./modules/vpn"
+
+  enabled = var.enable_p2s_vpn
+
+  resource_group_name = azurerm_resource_group.this.name
+  location            = azurerm_resource_group.this.location
+  tags                = var.tags
+
+  gateway_name = local.names.vpn_gateway
+  pip_name     = local.names.pip_vpn_gateway
+  subnet_id    = module.network.subnet_ids.gateway
+  sku          = var.vpn_gateway_sku
+
+  client_address_space      = var.p2s_client_address_space
+  trusted_root_certificates = var.p2s_trusted_root_certificates
+  client_dns_servers        = length(var.p2s_client_dns_servers) > 0 ? var.p2s_client_dns_servers : [module.dns_resolver.inbound_endpoint_ip]
+
+  depends_on = [azurerm_virtual_network_dns_servers.workload]
+}
+
+###############################################################################
 # Routing — UDR with default route -> Azure Firewall private IP (Phase 2)
 # Required by AKS outboundType=userDefinedRouting.
 ###############################################################################
@@ -191,14 +216,15 @@ module "routing" {
   location            = azurerm_resource_group.this.location
   tags                = var.tags
 
-  route_table_name    = local.names.route_table_aks
-  firewall_private_ip = module.firewall.firewall_private_ip
+  route_table_name            = local.names.route_table_aks
+  firewall_private_ip         = module.firewall.firewall_private_ip
+  p2s_client_address_prefixes = var.enable_p2s_vpn ? var.p2s_client_address_space : []
 
   subnet_ids_to_associate = {
     aks_nodes = module.network.subnet_ids.aks_nodes
   }
 
-  depends_on = [azurerm_virtual_network_dns_servers.workload]
+  depends_on = [azurerm_virtual_network_dns_servers.workload, module.vpn]
 }
 
 ###############################################################################
@@ -236,6 +262,8 @@ module "bastion" {
 
   log_analytics_workspace_id  = module.observability.log_analytics_workspace_id
   diagnostic_settings_enabled = var.terraform_managed_diagnostic_settings_enabled
+
+  depends_on = [azurerm_virtual_network_dns_servers.workload]
 }
 
 ###############################################################################

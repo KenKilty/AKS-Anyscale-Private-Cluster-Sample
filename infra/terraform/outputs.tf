@@ -38,6 +38,21 @@ output "vnet_dns_servers" {
   value       = azurerm_virtual_network_dns_servers.workload.dns_servers
 }
 
+output "p2s_vpn_contract" {
+  description = "Plan-time contract for the optional Point-to-Site VPN path."
+  value       = module.vpn.contract
+}
+
+output "vpn_gateway_name" {
+  description = "Name of the Azure VPN Gateway when P2S is enabled."
+  value       = module.vpn.gateway_name
+}
+
+output "vpn_gateway_public_ip" {
+  description = "Public IP address of the Azure VPN Gateway when P2S is enabled."
+  value       = module.vpn.public_ip_address
+}
+
 output "log_analytics_workspace_id" {
   description = "Log Analytics workspace ID (full ARM id)."
   value       = module.observability.log_analytics_workspace_id
@@ -182,6 +197,7 @@ output "private_mode_validation" {
     aks                = module.aks.private_mode
     workload_identity  = module.aks.workload_identity
     routing            = module.routing.egress_route
+    vpn                = module.vpn.contract
     firewall           = module.firewall.egress_validation
     dns_resolver       = module.dns_resolver.private_dns_resolver_validation
     vnet_dns_servers   = azurerm_virtual_network_dns_servers.workload.dns_servers

@@ -63,6 +63,7 @@ variable "subnet_cidrs" {
   description = <<-EOT
     Subnet CIDRs. AzureFirewallSubnet must be at least /26, AzureBastionSubnet must be at least /26,
     AKS API server delegated subnet must be at least /28 (Microsoft.ContainerService/managedClusters delegation).
+    GatewaySubnet must be /27 or larger when P2S VPN is enabled.
   EOT
   type = object({
     firewall          = string
@@ -72,16 +73,70 @@ variable "subnet_cidrs" {
     dns_resolver_out  = string
     private_endpoints = string
     aks_nodes         = string
+    gateway           = optional(string)
   })
 
   validation {
-    condition     = alltrue([for cidr in values(var.subnet_cidrs) : can(cidrhost(cidr, 0))])
+    condition     = alltrue([for cidr in values(var.subnet_cidrs) : can(cidrhost(cidr, 0)) if cidr != null])
     error_message = "All subnet_cidrs values must be valid CIDR blocks."
   }
 
   validation {
-    condition     = tonumber(split("/", var.subnet_cidrs.firewall)[1]) <= 26 && tonumber(split("/", var.subnet_cidrs.bastion)[1]) <= 26 && tonumber(split("/", var.subnet_cidrs.aks_apiserver)[1]) <= 28 && tonumber(split("/", var.subnet_cidrs.dns_resolver_in)[1]) <= 28 && tonumber(split("/", var.subnet_cidrs.dns_resolver_out)[1]) <= 28
-    error_message = "Firewall and Bastion subnets must be /26 or larger; AKS API server and DNS Private Resolver subnets must be /28 or larger."
+    condition     = tonumber(split("/", var.subnet_cidrs.firewall)[1]) <= 26 && tonumber(split("/", var.subnet_cidrs.bastion)[1]) <= 26 && tonumber(split("/", var.subnet_cidrs.aks_apiserver)[1]) <= 28 && tonumber(split("/", var.subnet_cidrs.dns_resolver_in)[1]) <= 28 && tonumber(split("/", var.subnet_cidrs.dns_resolver_out)[1]) <= 28 && try(var.subnet_cidrs.gateway == null ? true : tonumber(split("/", var.subnet_cidrs.gateway)[1]) <= 27, true)
+    error_message = "Firewall and Bastion subnets must be /26 or larger; AKS API server and DNS Private Resolver subnets must be /28 or larger; GatewaySubnet must be /27 or larger when set."
+  }
+}
+
+variable "enable_p2s_vpn" {
+  description = "Whether to deploy an Azure VPN Gateway Point-to-Site endpoint for operator access to private data-plane paths."
+  type        = bool
+  default     = false
+}
+
+variable "p2s_client_address_space" {
+  description = "Client address pool(s) assigned to Point-to-Site VPN clients. These must not overlap the workload VNet or on-premises ranges."
+  type        = list(string)
+  default     = ["172.16.201.0/24"]
+
+  validation {
+    condition     = length(var.p2s_client_address_space) > 0 && alltrue([for cidr in var.p2s_client_address_space : can(cidrhost(cidr, 0))])
+    error_message = "p2s_client_address_space must contain at least one valid CIDR block."
+  }
+}
+
+variable "p2s_client_dns_servers" {
+  description = "Optional DNS servers to inject into generated VPN client configuration artifacts. When empty, use the Azure DNS Private Resolver inbound endpoint."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = alltrue([for ip in var.p2s_client_dns_servers : can(cidrhost("${ip}/32", 0))])
+    error_message = "p2s_client_dns_servers must contain valid IP addresses."
+  }
+}
+
+variable "p2s_trusted_root_certificates" {
+  description = "Trusted root certificates for certificate-auth P2S VPN. Supply public certificate data only; never store private keys in Terraform."
+  type = list(object({
+    name             = string
+    public_cert_data = string
+  }))
+  default = []
+
+  validation {
+    condition     = alltrue([for cert in var.p2s_trusted_root_certificates : length(trimspace(cert.name)) > 0 && length(trimspace(cert.public_cert_data)) > 0])
+    error_message = "Each p2s_trusted_root_certificates entry must include a non-empty name and public_cert_data value."
+  }
+}
+
+variable "vpn_gateway_sku" {
+  description = "Azure VPN Gateway SKU for P2S access."
+  type        = string
+  default     = "VpnGw1AZ"
+
+  validation {
+    condition     = contains(["VpnGw1", "VpnGw2", "VpnGw3", "VpnGw4", "VpnGw5", "VpnGw1AZ", "VpnGw2AZ", "VpnGw3AZ", "VpnGw4AZ", "VpnGw5AZ"], var.vpn_gateway_sku)
+    error_message = "vpn_gateway_sku must be a supported VPN gateway SKU."
   }
 }
 

@@ -1,8 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
-<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="920" viewBox="0 0 1600 920" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1040" viewBox="0 0 1800 1040" role="img" aria-labelledby="title desc">
   <title id="title">Private Anyscale-ready AKS on Azure</title>
-  <desc id="desc">Simplified Azure architecture diagram using official draw.io Azure2 icon artwork. It shows Bastion-first operator access, a private AKS API, in-cluster bootstrap, VNet-resident private endpoints for ADLS Gen2 and ACR, Azure-native Anyscale platform deployment outside the workload VNet, Azure Firewall egress, DNS Private Resolver, and Log Analytics plus AMPLS observability.</desc>
+  <desc id="desc">Architecture diagram for the AKS Anyscale private cluster sample. It shows Bastion-first control-plane access, a private AKS API, Azure Firewall-managed egress, private endpoints for ADLS Gen2 and ACR, Azure DNS Private Resolver, the Anyscale SaaS control plane outside the workload VNet, and an optional Azure VPN Gateway Point-to-Site path for local console and private session browser testing.</desc>
   <defs>
     <marker id="arrow-blue" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
       <path d="M0,0 L10,5 L0,10 Z" fill="#2563eb"/>
@@ -13,14 +12,21 @@
     <marker id="arrow-orange" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
       <path d="M0,0 L10,5 L0,10 Z" fill="#f59e0b"/>
     </marker>
+    <marker id="arrow-teal" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#14b8a6"/>
+    </marker>
+    <marker id="arrow-slate" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#64748b"/>
+    </marker>
     <style>
       .page { fill: #ffffff; }
       .title { font: 700 28px Inter, Segoe UI, Arial, sans-serif; fill: #111827; }
       .subtitle { font: 15px Inter, Segoe UI, Arial, sans-serif; fill: #4b5563; }
-      .label { font: 700 15px Inter, Segoe UI, Arial, sans-serif; fill: #334155; }
+      .label { font: 700 16px Inter, Segoe UI, Arial, sans-serif; fill: #334155; }
       .panel-title { font: 700 15px Inter, Segoe UI, Arial, sans-serif; fill: #334155; }
       .panel-copy { font: 12px Inter, Segoe UI, Arial, sans-serif; fill: #64748b; }
-      .subnet-text { font: 12px Inter, Segoe UI, Arial, sans-serif; fill: #1e40af; }
+      .subnet-label { font: 600 12px Inter, Segoe UI, Arial, sans-serif; fill: #1e40af; }
+      .subnet-orange-label { font: 600 12px Inter, Segoe UI, Arial, sans-serif; fill: #9a3412; }
       .card-title { font: 600 13px Inter, Segoe UI, Arial, sans-serif; fill: #111827; }
       .card-copy { font: 12px Inter, Segoe UI, Arial, sans-serif; fill: #374151; }
       .card-copy-strong { font: 12px Inter, Segoe UI, Arial, sans-serif; fill: #065f46; }
@@ -38,334 +44,193 @@
       .card-teal { stroke: #14b8a6; }
       .banner { fill: #ecfdf5; stroke: #10b981; stroke-width: 1.2; }
       .line-blue { stroke: #2563eb; stroke-width: 2.5; fill: none; marker-end: url(#arrow-blue); }
+      .line-blue-dash { stroke: #2563eb; stroke-width: 2.5; stroke-dasharray: 8 5; fill: none; marker-end: url(#arrow-blue); }
       .line-green { stroke: #10b981; stroke-width: 2.5; fill: none; marker-end: url(#arrow-green); }
       .line-green-dash { stroke: #10b981; stroke-width: 2.5; stroke-dasharray: 8 5; fill: none; marker-end: url(#arrow-green); }
       .line-orange { stroke: #f59e0b; stroke-width: 2.5; fill: none; marker-end: url(#arrow-orange); }
+      .line-teal-dash { stroke: #14b8a6; stroke-width: 2.5; stroke-dasharray: 8 5; fill: none; marker-end: url(#arrow-teal); }
+      .line-slate-dash { stroke: #64748b; stroke-width: 2.5; stroke-dasharray: 6 4; fill: none; marker-end: url(#arrow-slate); }
+      .edge-label { font: 11px Inter, Segoe UI, Arial, sans-serif; fill: #475569; text-anchor: middle; }
+      .edge-label-blue { font: 11px Inter, Segoe UI, Arial, sans-serif; fill: #1d4ed8; text-anchor: middle; }
+      .edge-label-teal { font: 11px Inter, Segoe UI, Arial, sans-serif; fill: #0f766e; text-anchor: middle; }
+      .edge-label-bg { fill: #ffffff; }
+      .center { text-anchor: middle; }
     </style>
-    <symbol id="icon-bastion" viewBox="0 0 15.488095 18.000553">
-      <defs>
-        <linearGradient id="b1ebad31-96e8-487e-93d6-4a68da28a89e" x1="12.896" y1="-0.54000002" x2="12.896" y2="6.9219999" gradientUnits="userSpaceOnUse">
-          <stop offset="0" stop-color="#5ea0ef"/>
-          <stop offset="1" stop-color="#0078d4"/>
-        </linearGradient>
-        <linearGradient id="fb6a68a2-e02a-438b-8ccf-ab9786098481" x1="5.1040001" y1="5.0349998" x2="5.1040001" y2="12.497" gradientUnits="userSpaceOnUse">
-          <stop offset="0" stop-color="#5ea0ef"/>
-          <stop offset="1" stop-color="#0078d4"/>
-        </linearGradient>
-      </defs>
-      <path d="m 14.125704,12.107255 -0.802137,0.804409 a 0.363,0.363 0 0 1 -0.513359,7.25e-4 L 6.874866,6.9938052 A 0.727,0.727 0 0 1 6.8734125,5.965673 L 7.6755494,5.1612649 14.125684,11.593188 a 0.363,0.363 0 0 1 2e-5,0.514067 z" fill="#83b9f9"/>
-      <path d="m 13.204159,0.10576843 0.804409,0.8021369 A 0.363,0.363 0 0 1 14.009293,1.4212643 L 7.6712824,7.7772213 6.8668739,6.9750844 A 0.727,0.727 0 0 1 6.8654204,5.9469522 L 12.689386,0.10649617 a 0.363,0.363 0 0 1 0.513359,-7.2574e-4 z" fill="url(#b1ebad31-96e8-487e-93d6-4a68da28a89e)"/>
-      <path d="m 5.3010912,10.143283 0.8021369,0.804408 a 0.727,0.727 0 0 1 -0.00145,1.028133 L 0.16643246,17.894408 A 0.363,0.363 0 0 1 -0.34692652,17.893682 l -0.80284301,-0.805116 a 0.363,0.363 0 0 1 7.2574e-4,-0.513359 z" fill="#83b9f9"/>
-      <path d="M 6.1087998,11.956514 5.3043917,12.758651 -1.0322074,6.4041104 a 0.363,0.363 0 0 1 7.2574e-4,-0.513359 l 0.80440898,-0.8021369 a 0.363,0.363 0 0 1 0.513359,7.257e-4 l 5.8239658,5.8404558 a 0.727,0.727 45 0 1 -0.00145,1.028132 z" fill="url(#fb6a68a2-e02a-438b-8ccf-ab9786098481)"/>
-    </symbol>
-    <symbol id="icon-k8s" viewBox="0 0 18.08 15.9">
-      <defs>
-        <linearGradient id="b70c9cf1-bab8-47e0-bbdb-ce1cd664d268" x1="2.9400001" y1="3.74" x2="8.6700001" y2="3.74" gradientUnits="userSpaceOnUse">
-          <stop offset="0" stop-color="#b77af4"/>
-          <stop offset="1" stop-color="#773adc"/>
-        </linearGradient>
-        <linearGradient id="beb69953-bd96-4515-8843-ac12546af936" x1="9.1300001" y1="3.79" x2="14.85" y2="3.79" gradientUnits="userSpaceOnUse">
-          <stop offset="0" stop-color="#b77af4"/>
-          <stop offset="1" stop-color="#773adc"/>
-        </linearGradient>
-        <linearGradient id="a39c76e8-547e-4eb4-bc25-d81c0f8cda62" x1="0.0099999998" y1="9.1199999" x2="5.73" y2="9.1199999" gradientUnits="userSpaceOnUse">
-          <stop offset="0" stop-color="#b77af4"/>
-          <stop offset="1" stop-color="#773adc"/>
-        </linearGradient>
-        <linearGradient id="f0a2a491-17dc-4bb8-bbfc-ee58a5cf47da" x1="6.1799998" y1="9.0799999" x2="11.9" y2="9.0799999" gradientUnits="userSpaceOnUse">
-          <stop offset="0" stop-color="#b77af4"/>
-          <stop offset="1" stop-color="#773adc"/>
-        </linearGradient>
-        <linearGradient id="efc6a56d-8585-417d-931a-1dac2114ccd0" x1="12.35" y1="9.1300001" x2="18.08" y2="9.1300001" gradientUnits="userSpaceOnUse">
-          <stop offset="0" stop-color="#b77af4"/>
-          <stop offset="1" stop-color="#773adc"/>
-        </linearGradient>
-        <linearGradient id="e399aa93-341f-4df2-9c02-603b82b484c2" x1="2.8699999" y1="14.56" x2="8.6000004" y2="14.56" gradientUnits="userSpaceOnUse">
-          <stop offset="0" stop-color="#b77af4"/>
-          <stop offset="1" stop-color="#773adc"/>
-        </linearGradient>
-        <linearGradient id="a152bba0-ba2b-483a-b8c1-0ae7de355990" x1="9.0500002" y1="14.6" x2="14.78" y2="14.6" gradientUnits="userSpaceOnUse">
-          <stop offset="0" stop-color="#b77af4"/>
-          <stop offset="1" stop-color="#773adc"/>
-        </linearGradient>
-      </defs>
-      <polygon points="2.94,4.43 5.8,5.04 8.67,3.89 8.67,0.98 5.8,0 2.94,0.53" fill="url(#b70c9cf1-bab8-47e0-bbdb-ce1cd664d268)"/>
-      <path d="M 5.91,4.98 8.53,3.92 A 0.2,0.2 0 0 0 8.65,3.78 V 1.14 A 0.21,0.21 0 0 0 8.52,0.96 L 5.87,0.06 H 5.75 L 3.15,0.54 A 0.2,0.2 0 0 0 3,0.72 V 4.25 A 0.19,0.19 0 0 0 3.15,4.44 L 5.78,4.99 A 0.32,0.32 0 0 0 5.91,4.98 Z" fill="none"/>
-      <path d="m 2.94,0.53 v 3.9 l 2.89,0.61 v -5 z M 4.16,4.13 3.35,3.97 v -3 L 4.16,0.84 Z M 5.42,4.36 4.49,4.21 V 0.78 L 5.42,0.62 Z" fill="#341a6e"/>
-      <polygon points="9.13,4.48 11.99,5.09 14.85,3.93 14.85,1.03 11.99,0.05 9.13,0.58" fill="url(#beb69953-bd96-4515-8843-ac12546af936)"/>
-      <path d="m 9.13,0.58 v 3.9 L 12,5.09 v -5 z m 1.21,3.6 -0.81,-0.16 v -3 L 10.34,0.89 Z M 11.6,4.41 10.67,4.26 V 0.83 L 11.6,0.66 Z" fill="#341a6e"/>
-      <polygon points="0.01,9.81 2.87,10.42 5.74,9.27 5.74,6.36 2.87,5.38 0.01,5.91" fill="url(#a39c76e8-547e-4eb4-bc25-d81c0f8cda62)"/>
-      <path d="m 0,5.91 v 3.87 l 2.89,0.61 v -5 z M 1.21,9.52 0.4,9.35 v -3 L 1.21,6.21 Z M 2.48,9.78 1.55,9.63 V 6.16 L 2.48,6 Z" fill="#341a6e"/>
-      <polygon points="6.18,9.77 9.04,10.39 11.9,9.23 11.9,6.32 9.04,5.34 6.18,5.87" fill="url(#f0a2a491-17dc-4bb8-bbfc-ee58a5cf47da)"/>
-      <path d="m 6.18,5.87 v 3.91 l 2.88,0.61 v -5 z M 7.39,9.48 6.58,9.31 v -3 L 7.39,6.17 Z M 8.65,9.7 7.72,9.55 V 6.12 L 8.65,5.96 Z" fill="#341a6e"/>
-      <polygon points="12.35,9.82 15.21,10.43 18.08,9.28 18.08,6.37 15.21,5.39 12.35,5.92" fill="url(#efc6a56d-8585-417d-931a-1dac2114ccd0)"/>
-      <path d="m 12.35,5.92 v 3.86 l 2.89,0.61 v -5 z m 1.22,3.61 -0.81,-0.17 v -3 L 13.57,6.22 Z M 14.83,9.75 13.9,9.6 V 6.17 l 0.93,-0.16 z" fill="#341a6e"/>
-      <polygon points="2.87,15.24 5.73,15.86 8.6,14.7 8.6,11.8 5.73,10.82 2.87,11.34" fill="url(#e399aa93-341f-4df2-9c02-603b82b484c2)"/>
-      <path d="m 5.84,15.78 2.61,-1 A 0.18,0.18 0 0 0 8.57,14.6 V 12 A 0.2,0.2 0 0 0 8.44,11.78 L 5.8,10.88 a 0.17,0.17 0 0 0 -0.12,0 l -2.6,0.47 a 0.19,0.19 0 0 0 -0.16,0.19 v 3.54 a 0.19,0.19 0 0 0 0.15,0.19 l 2.63,0.51 a 0.23,0.23 0 0 0 0.14,0 z" fill="none"/>
-      <path d="m 2.87,11.34 v 3.9 l 2.89,0.62 v -5.08 z m 1.22,3.61 -0.81,-0.17 v -3 l 0.81,-0.14 z m 1.26,0.23 -0.93,-0.15 v -3.44 l 0.93,-0.16 z" fill="#341a6e"/>
-      <polygon points="9.05,15.29 11.91,15.9 14.78,14.75 14.78,11.84 11.91,10.86 9.05,11.39" fill="url(#a152bba0-ba2b-483a-b8c1-0ae7de355990)"/>
-      <path d="m 9.05,11.39 v 3.9 l 2.89,0.61 v -5 z M 10.27,15 9.46,14.83 v -3 l 0.81,-0.14 z m 1.26,0.22 -0.93,-0.15 v -3.43 l 0.93,-0.16 z" fill="#341a6e"/>
-    </symbol>
-    <symbol id="icon-dns" viewBox="0 0 17.996107 15.835691">
-      <defs>
-        <linearGradient id="e28f6ef1-fd31-4751-9108-f94729c0f169" x1="9.0489998" y1="0.1104261" x2="9.0489998" y2="15.806426" gradientUnits="userSpaceOnUse">
-          <stop offset="0" stop-color="#0078d4"/>
-          <stop offset="1" stop-color="#005ba1"/>
-        </linearGradient>
-      </defs>
-      <path d="m 16.440035,7.8824261 a 7.392,7.392 0 0 1 -7.39,7.3899999 7.5,7.5 0 0 1 -0.96,-0.06 7.184,7.184 0 0 1 -2.82,-0.98 l -0.08,-0.59 -0.09,-0.7 -0.06,-0.43 a 0.735,0.735 0 0 0 -0.23,-0.41 0.638,0.638 0 0 0 -0.83,0.05 l -0.21,0.21 -0.33,0.33 a 7.331,7.331 0 0 1 -1.78,-4.5499999 2.348,2.348 0 0 1 -0.01,-0.26 7.4,7.4 0 0 1 7.4,-7.39999997 7.252,7.252 0 0 1 3.746,1.03199997 l 0.08,0.6 0.1,0.69 0.07,0.51 a 0.672,0.672 0 0 0 0.17,0.36 0.647,0.647 0 0 0 0.44,0.18 0.6,0.6 0 0 0 0.44,-0.18 l 0.57,-0.57 a 7.278,7.278 0 0 1 1.774,4.778 z" fill="url(#e28f6ef1-fd31-4751-9108-f94729c0f169)"/>
-      <path d="m 14.510035,3.6144261 a 1.462,1.462 0 0 0 -0.16,-0.19 l -0.25,0.25 a 0.6,0.6 0 0 1 -0.44,0.18 0.647,0.647 0 0 1 -0.44,-0.18 8.074,8.074 0 0 1 -1.15,0.32 l -0.11,0.02 -0.04,-0.11 a 8.115,8.115 0 0 0 -0.79,-1.88 l -0.17,-0.29 0.32,0.12 a 6.294,6.294 0 0 1 1.7,0.95 l -0.1,-0.69 a 7,7 0 0 0 -3.41,-1.15999997 c -0.13,0 -0.28,-0.01 -0.42,-0.01 -0.14,0 -0.3,0.01 -0.42,0.01 a 6.715,6.715 0 0 0 -0.9,0.11999997 7.016,7.016 0 0 0 -3.9,2.23 c -0.08,0.1 -0.17,0.2 -0.25,0.31 a 6.866,6.866 0 0 0 -1.47,4.27 3.027,3.027 0 0 0 0.02,0.44 6.829,6.829 0 0 0 1.45,3.8299999 c 0.06,0.07 0.12,0.14 0.19,0.21 l 0.21,-0.21 a 0.638,0.638 0 0 1 0.83,-0.05 10.309,10.309 0 0 1 1.22,-0.33 l 0.11,-0.03 0.03,0.11 a 8.178,8.178 0 0 0 0.79,1.88 l 0.18,0.3 -0.33,-0.12 a 6.3,6.3 0 0 1 -1.71,-0.97 l 0.09,0.7 a 7.018,7.018 0 0 0 2.54,1.05 c 0.07,0.01 0.15,0.03 0.22,0.04 0.22,0.03 0.45,0.06 0.68,0.07 0.12,0.01 0.26,0.02 0.42,0.02 0.16,0 0.29,-0.01 0.42,-0.02 a 7.126,7.126 0 0 0 0.9,-0.11 6.99,6.99 0 0 0 3.89,-2.23 c 0.08,-0.1 0.17,-0.21 0.26,-0.31 a 6.877,6.877 0 0 0 1.46,-4.2699999 6.806,6.806 0 0 0 -1.47,-4.27 z m -6.58,-2.04 0.03,-0.03 0.036,-0.012 a 7.066,7.066 0 0 1 1.04,-0.08 7.452,7.452 0 0 1 1.06,0.08 l 0.04,0.01 0.02,0.03 a 6.06,6.06 0 0 1 1.26,2.4 l 0.04,0.13 -0.14,0.02 a 15.045,15.045 0 0 1 -2.27,0.17 15.281,15.281 0 0 1 -2.28,-0.17 l -0.13,-0.02 0.04,-0.13 a 5.931,5.931 0 0 1 1.254,-2.4 z m -2.07,8.9199999 h 0.02 v 0.11 c 0.03,0.18 0.07,0.36 0.11,0.54 l 0.02,0.12 -0.12,0.02 a 11.445,11.445 0 0 0 -1.79,0.55 l -0.09,0.04 -0.06,-0.07 a 6.443,6.443 0 0 1 -1.29,-3.1899999 5.846,5.846 0 0 1 -0.04,-0.73 6.464,6.464 0 0 1 1.33,-3.92 l 0.06,-0.08 0.09,0.04 a 10.688,10.688 0 0 0 1.79,0.55 l 0.12,0.03 -0.02,0.12 a 14.81,14.81 0 0 0 -0.35,3.26 14.909,14.909 0 0 0 0.22,2.6079999 z m 0.17,-6.4999999 a 9.092,9.092 0 0 1 -1.5,-0.44 l -0.18,-0.06 0.13,-0.14 a 6.481,6.481 0 0 1 2.33,-1.5 l 0.33,-0.12 -0.18,0.29 a 8.371,8.371 0 0 0 -0.79,1.88 l -0.03,0.11 z m 0.48,7.1799999 -0.03,-0.12 a 14.479,14.479 0 0 1 -0.33,-3.1699999 14.572,14.572 0 0 1 0.33,-3.18 l 0.03,-0.11 0.11,0.02 a 16.052,16.052 0 0 0 2.43,0.19 16.154,16.154 0 0 0 2.43,-0.19 l 0.11,-0.02 0.02,0.11 a 13.97,13.97 0 0 1 0.34,3.18 13.881,13.881 0 0 1 -0.34,3.1699999 l -0.02,0.12 -0.11,-0.02 a 14.769,14.769 0 0 0 -2.43,-0.19 14.683,14.683 0 0 0 -2.43,0.19 z m 3.65,3.02 -0.02,0.03 h -0.044 a 6.2,6.2 0 0 1 -1.05,0.09 6.031,6.031 0 0 1 -1.05,-0.092 l -0.04,-0.01 -0.03,-0.03 a 3.168,3.168 0 0 1 -0.46,-0.6 6.411,6.411 0 0 1 -0.66,-1.39 3.136,3.136 0 0 1 -0.13,-0.4 l -0.04,-0.14 0.13,-0.02 a 15.3,15.3 0 0 1 2.28,-0.16 15.071,15.071 0 0 1 2.27,0.16 l 0.14,0.02 -0.04,0.14 a 6,6 0 0 1 -1.256,2.4 z m 3.45,-1.79 a 6.421,6.421 0 0 1 -2.33,1.51 l -0.32,0.12 0.17,-0.3 a 7.7,7.7 0 0 0 0.79,-1.88 l 0.04,-0.11 0.11,0.03 a 10.187,10.187 0 0 1 1.5,0.43 l 0.17,0.07 z m 0.53,-0.6 -0.05,0.07 -0.09,-0.04 a 10.877,10.877 0 0 0 -1.8,-0.55 l -0.12,-0.02 0.03,-0.12 a 14.944,14.944 0 0 0 0.35,-3.2599999 14.877,14.877 0 0 0 -0.35,-3.26 l -0.03,-0.12 0.12,-0.03 a 10.877,10.877 0 0 0 1.8,-0.55 l 0.08,-0.04 0.06,0.08 a 6.4,6.4 0 0 1 0,7.8399999 z" fill="#5ea0ef"/>
-      <path d="m 9.837035,9.9864261 c -0.263,0 -0.527,0 -0.79,0 -0.263,0 -0.527,0 -0.791,0 a 0.254,0.254 0 0 1 -0.245,-0.332 c 0.041,-0.146 0.417,-1.389 0.562,-1.869 a 1.045,1.045 0 1 1 0.948,0 c 0.145,0.48 0.52,1.723 0.562,1.869 a 0.255,0.255 0 0 1 -0.246,0.332 z" fill="#003067"/>
-      <path d="m 17.996035,7.8724261 a 8.942,8.942 0 0 1 -2.64,6.3599999 0.578,0.578 0 0 1 -0.4,0.17 0.561,0.561 0 0 1 -0.4,-0.17 0.567,0.567 0 0 1 0,-0.8 7.839,7.839 0 0 0 2.3,-5.5599999 7.743,7.743 0 0 0 -2.16,-5.4 l -0.9,0.9 a 0.2,0.2 0 0 1 -0.33,-0.11 l -0.42,-3.03999997 a 0.192,0.192 0 0 1 0.22,-0.22 l 3.04,0.41 a 0.2,0.2 0 0 1 0.11,0.34 l -0.91,0.90999997 a 8.9,8.9 0 0 1 2.49,6.21 z m -13.39,4.6999999 a 0.2,0.2 0 0 0 -0.33,-0.12 l -0.91,0.91 a 7.859,7.859 0 0 1 0.064,-11.0479999 0.562,0.562 0 0 0 0,-0.81 0.567,0.567 0 0 0 -0.8,0 9.018,9.018 0 0 0 -0.06,12.6699999 l -0.91,0.91 a 0.192,0.192 0 0 0 0.11,0.33 l 3.04,0.42 a 0.2,0.2 0 0 0 0.22,-0.23 z" fill="#50e6ff"/>
-    </symbol>
-    <symbol id="icon-pe" viewBox="0 0 53.798553 49.537819">
-      <path fill="#7b7b7b" d="m 25.099515,7.156907 v 24.320312 h 3.40039 V 7.156907 Z"/>
-      <circle fill="#369dc6" cx="26.902805" cy="4.84282" r="4.8428197"/>
-      <circle fill="#84b926" cx="26.950055" cy="34.58021" r="5.9295011"/>
-      <path fill="#369dc6" d="m 38.767485,19.615891 a 1.70017,1.70017 0 0 0 -1.16016,2.929688 l 12.07422,11.873051 -12.24805,12.20312 a 1.70017,1.70017 0 1 0 2.39844,2.41016 l 13.4668,-13.41797 a 1.70017,1.70017 0 0 0 -0.008,-2.41602 L 39.992095,20.121751 a 1.70017,1.70017 0 0 0 -1.22461,-0.50586 z m -23.787111,0.002 a 1.70017,1.70017 0 0 0 -1.173828,0.503907 L 0.50768742,33.19792 a 1.70017,1.70017 0 0 0 -0.0078,2.41602 l 13.46679758,13.41797 a 1.70017,1.70017 0 1 0 2.398437,-2.41016 L 4.1170624,34.41861 16.191281,22.545561 a 1.70017,1.70017 0 0 0 -1.210937,-2.927735 z"/>
-    </symbol>
-    <symbol id="icon-storage" viewBox="0 0 17 13.67">
-      <defs>
-        <linearGradient id="ad4c4f96-09aa-4f91-ba10-5cb8ad530f74" x1="9" y1="15.83" x2="9" y2="5.79" gradientUnits="userSpaceOnUse">
-          <stop offset="0" stop-color="#b3b3b3"/>
-          <stop offset="0.26" stop-color="#c1c1c1"/>
-          <stop offset="1" stop-color="#e6e6e6"/>
-        </linearGradient>
-      </defs>
-      <path d="m 0,3.62 h 17 v 9.48 a 0.57,0.57 0 0 1 -0.57,0.57 H 0.57 A 0.57,0.57 0 0 1 0,13.1 Z" fill="url(#ad4c4f96-09aa-4f91-ba10-5cb8ad530f74)"/>
-      <path d="M 0.57,0 H 16.43 A 0.57,0.57 0 0 1 17,0.57000001 V 3.62 H 0 V 0.56000001 A 0.57,0.57 0 0 1 0.57,0 Z" fill="#37c2b1"/>
-      <path d="m 2.31,4.72 h 12.37 a 0.27,0.27 0 0 1 0.26,0.27 v 1.4 A 0.27,0.27 0 0 1 14.68,6.66 H 2.31 A 0.27,0.27 0 0 1 2.05,6.39 V 4.99 A 0.27,0.27 0 0 1 2.31,4.72 Z" fill="#ffffff"/>
-      <path d="m 2.32,7.51 h 12.37 a 0.27,0.27 0 0 1 0.26,0.27 V 9.19 A 0.27,0.27 0 0 1 14.69,9.46 H 2.32 A 0.27,0.27 0 0 1 2.06,9.19 V 7.83 A 0.27,0.27 0 0 1 2.32,7.51 Z" fill="#37c2b1"/>
-      <path d="m 2.32,10.33 h 12.37 a 0.27,0.27 0 0 1 0.26,0.27 v 1.41 a 0.27,0.27 0 0 1 -0.26,0.27 H 2.32 A 0.27,0.27 0 0 1 2.06,12.01 V 10.6 a 0.27,0.27 0 0 1 0.26,-0.27 z" fill="#258277"/>
-    </symbol>
-    <symbol id="icon-acr" viewBox="0 0 17.99 16.123848">
-      <defs>
-        <linearGradient id="bdf27dc6-025c-4805-8bfd-3a05defd3fbd" x1="8.6370001" y1="-1.9910001" x2="8.6370001" y2="16.739" gradientUnits="userSpaceOnUse">
-          <stop offset="0" stop-color="#5ea0ef"/>
-          <stop offset="1" stop-color="#0078d4"/>
-        </linearGradient>
-        <linearGradient id="fcd6c6c7-e2eb-4a32-b914-3a8485585a1b" x1="12.96" y1="8.5609999" x2="12.96" y2="6.1409998" gradientTransform="matrix(1,0,0,-1,0,21.616153)" gradientUnits="userSpaceOnUse">
-          <stop offset="0" stop-color="#333132"/>
-          <stop offset="1" stop-color="#5b5a5c"/>
-        </linearGradient>
-      </defs>
-      <path d="m 7.43,6.5618471 2.589,-1.573 7.255,2.731 a 3.664,3.664 0 0 0 -1.044,-1.846 l -0.01,-0.05 A 4.194,4.194 0 0 0 14,4.7038471 4.91,4.91 0 0 0 8.9,0.00384713 5.071,5.071 0 0 0 4.06,3.2938471 4.621,4.621 0 0 0 0,7.7738471 4.73,4.73 0 0 0 4.89,12.313847 h 2.54 z" fill="url(#bdf27dc6-025c-4805-8bfd-3a05defd3fbd)"/>
-      <polygon points="17.99,11.502847 17.99,8.5228471 10.07,5.5428471 10.08,9.8228471" fill="#767676"/>
-      <polyline points="10.07,5.5428471 7.93,6.8428471 7.93,10.822847 10.08,9.8228471" fill="#999999"/>
-      <polygon points="14.4,7.7528471 13.68,7.5028471 13.68,9.8828471 14.4,10.082847" fill="#a3a3a3"/>
-      <polygon points="12.24,9.5028471 12.96,9.7028471 12.96,7.2728471 12.24,7.0128471" fill="#a3a3a3"/>
-      <polygon points="15.84,8.2428471 15.12,8.0028471 15.12,10.272847 15.82,10.462847" fill="#a3a3a3"/>
-      <polygon points="11.53,6.7828471 10.81,6.5428471 10.81,9.1328471 11.53,9.3128471" fill="#a3a3a3"/>
-      <polygon points="16.55,10.652847 17.27,10.852847 17.27,8.7328471 16.55,8.4828471" fill="#a3a3a3"/>
-      <path d="m 8.66,9.7528471 -0.36,0.21 v -2.83 l 0.36,-0.19 z m 0.71,-3.22 -0.37,0.24 v 2.75 l 0.37,-0.2 z" fill="#b3b3b3"/>
-      <polygon points="7.93,10.822847 10.08,9.8228471 17.99,11.502847 15.83,12.242847" fill="url(#fcd6c6c7-e2eb-4a32-b914-3a8485585a1b)"/>
-      <polygon points="10.08,10.472847 17.99,11.942847 17.99,14.552847 10.04,16.062847" fill="#767676"/>
-      <polygon points="11.53,11.682847 11.53,15.022847 10.81,15.142847 10.81,11.592847" fill="#a3a3a3"/>
-      <polygon points="12.24,11.772847 12.96,11.882847 12.96,14.782847 12.24,14.912847" fill="#a3a3a3"/>
-      <polygon points="14.4,12.042847 14.4,14.542847 13.68,14.672847 13.68,11.952847" fill="#a3a3a3"/>
-      <polygon points="15.12,12.132847 15.83,12.242847 15.83,14.292847 15.12,14.422847" fill="#a3a3a3"/>
-      <polygon points="16.55,12.312847 17.24,12.402847 17.29,14.062847 16.55,14.192847" fill="#a3a3a3"/>
-      <path d="m 7.93,14.783847 v -3.26 l 2.16,-1 v 5.6 z" fill="#999999"/>
-      <path d="m 8.61,14.772847 -0.32,-0.16 v -2.76 l 0.32,-0.15 z m 0.77,-3.45 -0.38,0.19 v 3.48 l 0.37,0.19 v -3.86 z" fill="#b3b3b3"/>
-    </symbol>
-    <symbol id="icon-firewall" viewBox="0 0 18 15.222359">
-      <defs>
-        <linearGradient id="b012de7b-7a0e-4618-9fec-703622e3e8c3" x1="9" y1="14.14" x2="9" y2="1.38" gradientUnits="userSpaceOnUse">
-          <stop offset="0" stop-color="#0078d4"/>
-          <stop offset="0.82" stop-color="#5ea0ef"/>
-        </linearGradient>
-      </defs>
-      <path d="m 18,8.7623585 a 4.06,4.06 0 0 0 -3.51,-3.89 5.1,5.1 0 0 0 -5.25,-4.87000004 5.23,5.23 0 0 0 -5,3.41000004 4.82,4.82 0 0 0 -4.24,4.64 4.9,4.9 0 0 0 5.07,4.7099995 h 0.44 8.21 a 1.46,1.46 0 0 0 0.22,0 A 4.1,4.1 0 0 0 18,8.7623585 Z" fill="url(#b012de7b-7a0e-4618-9fec-703622e3e8c3)"/>
-      <path d="m 14.29,9.8123585 a 0.42,0.42 0 0 0 -0.42,-0.41 H 4.13 a 0.42,0.42 0 0 0 -0.42,0.41 v 4.9999995 a 0.42,0.42 0 0 0 0.42,0.41 h 9.74 a 0.42,0.42 0 0 0 0.42,-0.41 z" fill="#821010"/>
-      <rect x="4.3000002" y="9.982358" width="2.8699999" height="1.27" fill="#e62323"/>
-      <rect x="7.5999999" y="9.982358" width="2.8699999" height="1.27" fill="#ff7381"/>
-      <rect x="10.9" y="9.982358" width="2.8699999" height="1.27" fill="#e62323"/>
-      <rect x="4.3000002" y="11.682359" width="1.1900001" height="1.27" fill="#e62323"/>
-      <rect x="12.58" y="11.682359" width="1.1900001" height="1.27" fill="#ff7381"/>
-      <rect x="5.9200001" y="11.682359" width="2.8699999" height="1.27" fill="#ff7381"/>
-      <rect x="9.2299995" y="11.682359" width="2.8699999" height="1.27" fill="#e62323"/>
-      <rect x="4.3000002" y="13.382359" width="2.8699999" height="1.27" fill="#e62323"/>
-      <rect x="7.5999999" y="13.382359" width="2.8699999" height="1.27" fill="#ff7381"/>
-      <rect x="10.9" y="13.382359" width="2.8699999" height="1.27" fill="#e62323"/>
-    </symbol>
-    <symbol id="icon-uami" viewBox="0 0 17.700001 17.001848">
-      <defs>
-        <linearGradient id="bb67b154-af8f-4a53-a9ce-aa046b9398e9" x1="13.03" y1="14.01" x2="8.48" y2="5.38" gradientUnits="userSpaceOnUse">
-          <stop offset="0" stop-color="#1988d9"/>
-          <stop offset="0.9" stop-color="#54aef0"/>
-        </linearGradient>
-        <linearGradient id="a47d7138-084a-471d-8d63-744e75b9e8a3" x1="11.07" y1="11.5" x2="14.22" y2="16.93" gradientUnits="userSpaceOnUse">
-          <stop offset="0.1" stop-color="#54aef0"/>
-          <stop offset="0.29" stop-color="#4fabee"/>
-          <stop offset="0.51" stop-color="#41a2e9"/>
-          <stop offset="0.74" stop-color="#2a93e0"/>
-          <stop offset="0.88" stop-color="#1988d9"/>
-        </linearGradient>
-      </defs>
-      <polygon fill="#50e6ff" points="8.78,16.11 0,10.37 1,9.22 8.78,14.27 16.7,9.21 17.7,10.36"/>
-      <polygon fill="#ffffff" points="1.58,8.58 8.78,0 16.13,8.59 8.78,13.23"/>
-      <polygon fill="#50e6ff" points="8.78,13.23 1.58,8.58 8.78,0"/>
-      <polygon fill="url(#bb67b154-af8f-4a53-a9ce-aa046b9398e9)" points="8.78,13.23 16.13,8.59 8.78,0"/>
-      <polygon fill="#53b1e0" points="16.13,8.59 8.78,13.23 8.78,6.83"/>
-      <polygon fill="#9cebff" points="1.58,8.58 8.78,6.83 8.78,13.23"/>
-      <polygon fill="url(#a47d7138-084a-471d-8d63-744e75b9e8a3)" points="8.78,16.11 17.7,10.36 16.7,9.21 8.78,14.27"/>
-      <path fill="#ffca00" d="m 16.02,9.88 a 1.16,1.16 0 0 0 0,-1.65 v 0 l -2,-2 a 1.16,1.16 0 0 0 -1.64,0 v 0 l -2,2 a 1.18,1.18 0 0 0 0,1.65 l 1.67,1.67 a 0.32,0.32 0 0 1 0.09,0.23 v 3.1 a 0.36,0.36 0 0 0 0.12,0.28 l 0.76,0.76 a 0.25,0.25 0 0 0 0.37,0 l 0.73,-0.73 v 0 l 0.44,-0.44 a 0.15,0.15 0 0 0 0,-0.21 L 14.25,14.23 a 0.16,0.16 0 0 1 0,-0.24 l 0.31,-0.31 a 0.16,0.16 0 0 0 0,-0.22 L 14.25,13.15 a 0.15,0.15 0 0 1 0,-0.23 l 0.31,-0.32 a 0.15,0.15 0 0 0 0,-0.21 L 14.12,11.95 V 11.79 Z M 13.2,6.71 a 0.66,0.66 0 1 1 -0.66,0.66 0.66,0.66 0 0 1 0.66,-0.66 z"/>
-      <path fill="#ff9300" opacity="0.75" d="m 12.7,15 v 0 a 0.14,0.14 0 0 0 0.24,-0.11 V 12.33 A 0.16,0.16 0 0 0 12.88,12.2 v 0 a 0.14,0.14 0 0 0 -0.22,0.13 v 2.51 A 0.15,0.15 0 0 0 12.7,15 Z"/>
-      <rect rx="0.18000001" x="11.6" y="8.9" width="3.29" height="0.38999999" fill="#ff9300" opacity="0.75"/>
-      <rect rx="0.18000001" x="11.6" y="9.53" width="3.29" height="0.38999999" fill="#ff9300" opacity="0.75"/>
-    </symbol>
-    <symbol id="icon-logs" viewBox="0 0 16.901033 16.900316">
-      <defs>
-        <linearGradient id="a997e203-1d7d-4cb9-b131-5dc44e029b46" x1="5.23" y1="17.450001" x2="5.23" y2="8.0900002" gradientUnits="userSpaceOnUse">
-          <stop offset="0" stop-color="#1988d9"/>
-          <stop offset="0.9" stop-color="#54aef0"/>
-        </linearGradient>
-        <linearGradient id="e122e9d8-aee5-4f1a-a60e-b1eae355daa5" x1="11.5" y1="12.45" x2="11.5" y2="0.55000001" gradientUnits="userSpaceOnUse">
-          <stop offset="0" stop-color="#198ab3"/>
-          <stop offset="0.01" stop-color="#198bb4"/>
-          <stop offset="0.44" stop-color="#27b2d7"/>
-          <stop offset="0.79" stop-color="#2fcbed"/>
-          <stop offset="1" stop-color="#32d4f5"/>
-        </linearGradient>
-      </defs>
-      <path d="m 5.04,12.580316 h 4.32 v 4.32 H 5.04 Z m -4.44,4.32 h 3.72 v -4.32 H 0 v 3.72 a 0.6,0.6 0 0 0 0.6,0.6 z m -0.6,-5 H 4.32 V 7.5403162 H 0 Z" fill="url(#a997e203-1d7d-4cb9-b131-5dc44e029b46)"/>
-      <path d="M 10.95,3.1622647e-4 A 5.89,5.89 0 0 1 16.9,6.0003162 5.89,5.89 0 0 1 10.95,11.950316 H 5 V 5.9503162 A 5.89,5.89 0 0 1 10.95,3.1622647e-4 Z" fill="url(#e122e9d8-aee5-4f1a-a60e-b1eae355daa5)" fill-rule="evenodd"/>
-      <rect x="7.04" y="5.1003165" width="1.36" height="4.0799999" fill="#ffffff"/>
-      <rect x="9.7600002" y="6.4603167" width="1.36" height="2.72" fill="#ffffff"/>
-      <rect x="12.48" y="3.7403162" width="1.36" height="5.4400001" fill="#ffffff"/>
-    </symbol>
-    <symbol id="icon-fwpolicy" viewBox="0 0 18 13.06">
-      <path d="M6 8.11V6.16h10.35V.64a.64.64 0 0 0-.64-.64H.64A.64.64 0 0 0 0 .64v7.75a.64.64 0 0 0 .64.64H9v-.92zm1.85-2.58H3.42v-2h4.43zm5.15 0H8.53v-2H13zm2.59 0h-1.88v-2h1.84zM11.12.9h4.43v2h-4.43zM6 .9h4.43v2H6zM.9.9h4.44v2H.9zm0 2.63h1.85v2H.9zm4.44 4.58H.9V6.16h4.44z" fill="#821010"/>
-      <path fill="#e62323" d="M.9.9h4.43v1.96H.9z"/>
-      <path fill="#ff7381" d="M6.01.9h4.43v1.96H6.01z"/>
-      <path d="M11.12.9h4.43v1.96h-4.43zM.9 3.53h1.84v1.96H.9z" fill="#e62323"/>
-      <path d="M13.71 3.53h1.84v1.96h-1.84zm-10.29 0h4.43v1.96H3.42z" fill="#ff7381"/>
-      <path d="M8.53 3.53h4.43v1.96H8.53zM.9 6.16h4.43v1.96H.9z" fill="#e62323"/>
-      <path d="M9 6.4a.25.25 0 0 1 .26-.24H6v1.95h3v-1.7z" fill="#ff7381"/>
-      <path d="M18 6.41v.95H9v5.44a.27.27 0 0 0 .28.26h8.41a.28.28 0 0 0 .29-.26V6.41zM9.72 8.74a.37.37 0 1 1 .37.37.38.38 0 0 1-.37-.37zm.37 3.36a.37.37 0 1 1 .37-.37.38.38 0 0 1-.37.37zm0-1.58a.38.38 0 0 1-.37-.37.37.37 0 0 1 .74 0 .38.38 0 0 1-.37.38zM17 11.88c0 .07-.1.13-.22.13h-5.55c-.12 0-.22-.06-.22-.13v-.35c0-.06.1-.12.22-.12h5.55c.12 0 .22.06.22.12zm0-1.58c0 .07-.1.13-.22.13h-5.55c-.12 0-.22-.06-.22-.13v-.31c0-.07.1-.12.22-.12h5.55c.12 0 .22.05.22.12zm0-1.41c0 .07-.1.13-.22.13h-5.55c-.12 0-.22-.06-.22-.13v-.31c0-.06.1-.12.22-.12h5.55c.12 0 .22.06.22.12z" fill="#e6e6e6"/>
-      <g fill="#666">
-        <path d="M9.29 6.15h0A.25.25 0 0 0 9 6.4h0v.95h9v-.94h0a.26.26 0 0 0-.27-.24H9.29zm7.49 3.72h-5.55c-.12 0-.22.05-.22.12v.31c0 .07.1.13.22.13h5.55c.12 0 .22-.06.22-.13v-.31c0-.07-.1-.12-.22-.12zm0-1.41h-5.55c-.12 0-.22.06-.22.12v.31c0 .07.1.13.22.13h5.55c.12 0 .22-.06.22-.13v-.31c0-.05-.1-.12-.22-.12zm0 2.99h-5.55c-.12 0-.22.06-.22.12v.31c0 .07.1.13.22.13h5.55c.12 0 .22-.06.22-.13v-.35s-.1-.08-.22-.08z"/>
-        <circle cx="10.09" cy="8.74" r=".37"/>
-        <circle cx="10.09" cy="10.15" r=".37"/>
-        <circle cx="10.09" cy="11.73" r=".37"/>
-      </g>
-    </symbol>
   </defs>
 
-  <rect class="page" x="0" y="0" width="1600" height="920"/>
+  <rect class="page" x="0" y="0" width="1800" height="1040"/>
 
-  <text class="title" x="40" y="52">Private Anyscale-ready AKS on Azure</text>
-  <text class="subtitle" x="40" y="82">Bastion-first operator access, private AKS API, in-cluster bootstrap, and private endpoint access to ADLS Gen2 and ACR.</text>
-  <text class="subtitle" x="40" y="104">Azure-native Anyscale platform deployment, Firewall-managed egress, and observability remain outside the workload VNet.</text>
+  <text class="title" x="40" y="58">Private Anyscale-ready AKS on Azure</text>
+  <text class="subtitle" x="40" y="92">
+    <tspan x="40" dy="0">Bastion-first control-plane access, private AKS API, private endpoints for ADLS Gen2 and ACR, and an optional Azure VPN Gateway P2S path for local console and browser testing.</tspan>
+    <tspan x="40" dy="22">Azure-native Anyscale platform resources, Firewall-managed egress, identity, and observability remain outside the workload VNet.</tspan>
+  </text>
 
-  <rect class="rg" x="180" y="140" width="1380" height="700" rx="10"/>
-  <text class="label" x="202" y="170">Resource group: rg-myproject-dev-wus3</text>
+  <rect class="rg" x="180" y="140" width="1560" height="760" rx="12" ry="12"/>
+  <text class="label" x="200" y="166">Resource group: rg-myproject-dev-wus3</text>
 
-  <rect class="vnet" x="240" y="210" width="880" height="560" rx="10"/>
-  <text class="label" x="262" y="240">Virtual network: vnet-myproject-dev-wus3 | 10.50.0.0/16</text>
+  <rect class="vnet" x="240" y="210" width="1080" height="620" rx="12" ry="12"/>
+  <text class="label" x="258" y="236">Virtual network: vnet-myproject-dev-wus3 | 10.50.0.0/16</text>
 
-  <rect class="panel" x="1160" y="210" width="360" height="560" rx="10"/>
-  <text class="panel-title" x="1185" y="240">Global platform and control services (outside VNet)</text>
-  <text class="panel-copy" x="1185" y="266">Anyscale platform deployment, identity, egress policy, and observability</text>
-  <text class="panel-copy" x="1185" y="284">stay outside the workload VNet.</text>
+  <rect class="panel" x="1360" y="210" width="340" height="620" rx="12" ry="12"/>
+  <text class="panel-title" x="1385" y="238">Global platform and control services (outside VNet)</text>
+  <text class="panel-copy" x="1385" y="264">
+    <tspan x="1385" dy="0">The Anyscale control plane, Azure resource model,</tspan>
+    <tspan x="1385" dy="18">identity surface, egress policy, and observability</tspan>
+    <tspan x="1385" dy="18">stay outside the workload VNet.</tspan>
+  </text>
 
-  <rect class="card" x="30" y="430" width="140" height="100" rx="8"/>
-  <text class="card-title" x="100" y="464" text-anchor="middle">Admin workstation</text>
-  <text class="card-copy" x="100" y="486" text-anchor="middle">Azure CLI + Terraform</text>
-  <text class="card-copy" x="100" y="506" text-anchor="middle">Anyscale CLI / helm</text>
-  <text class="card-copy" x="100" y="526" text-anchor="middle">kubelogin / kubectl</text>
+  <path class="line-blue" d="M180 480 L225 480 L225 330 L310 330"/>
+  <path class="line-blue" d="M470 330 L570 330"/>
+  <path class="line-blue" d="M650 365 L650 520 L750 520 L750 560"/>
+  <path class="line-slate-dash" d="M180 445 L220 445 L220 346 L1390 346"/>
+  <path class="line-teal-dash" d="M180 500 L220 500 L220 330 L825 330"/>
+  <path class="line-teal-dash" d="M995 326 L1010 326 L1010 686 L930 686"/>
+  <path class="line-green-dash" d="M490 510 L520 510 L700 430 L1090 430 L1090 308"/>
+  <path class="line-green" d="M930 607 L1030 607 L1030 308 L1090 308"/>
+  <path class="line-orange" d="M930 607 L980 607 L1060 592 L1090 592"/>
+  <path class="line-orange" d="M1250 592 L1320 592 L1320 656 L1390 656"/>
+  <path class="line-blue-dash" d="M1390 446 L1335 446 L1335 607 L930 607"/>
 
-  <rect class="subnet" x="280" y="250" width="220" height="150" rx="8"/>
-  <text class="subnet-text" x="298" y="276">AzureBastionSubnet</text>
-  <text class="subnet-text" x="298" y="294">10.50.0.128/26</text>
-  <rect class="card card-blue" x="310" y="295" width="160" height="70" rx="8"/>
-  <use href="#icon-bastion" x="326" y="312" width="28" height="32"/>
-  <text class="card-title" x="364" y="322">Azure Bastion Standard</text>
-  <text class="card-copy" x="364" y="342">Native client tunnel</text>
+  <rect class="edge-label-bg" x="722" y="334" width="116" height="18" rx="4" ry="4"/>
+  <text class="edge-label" x="780" y="347">browser auth + API</text>
 
-  <rect class="subnet" x="530" y="250" width="220" height="150" rx="8"/>
-  <text class="subnet-text" x="548" y="276">AKS API server subnet</text>
-  <text class="subnet-text" x="548" y="294">10.50.1.0/28</text>
-  <rect class="card card-blue" x="560" y="295" width="160" height="70" rx="8"/>
-  <use href="#icon-k8s" x="576" y="312" width="28" height="28"/>
-  <text class="card-title" x="614" y="322">Private AKS API</text>
-  <text class="card-copy" x="614" y="342">No public endpoint</text>
+  <rect class="edge-label-bg" x="454" y="314" width="102" height="18" rx="4" ry="4"/>
+  <text class="edge-label-teal" x="505" y="327">optional P2S</text>
 
-  <rect class="subnet" x="780" y="230" width="300" height="260" rx="8"/>
-  <text class="subnet-text" x="798" y="256">Private endpoint subnet</text>
-  <text class="subnet-text" x="798" y="274">10.50.2.0/24</text>
-  <rect class="card card-green" x="810" y="280" width="230" height="60" rx="8"/>
-  <use href="#icon-pe" x="826" y="292" width="28" height="28"/>
-  <text class="card-title" x="866" y="306">Private endpoint hub</text>
-  <text class="card-copy" x="866" y="326">Blob + DFS + ACR</text>
+  <rect class="edge-label-bg" x="1005" y="548" width="150" height="18" rx="4" ry="4"/>
+  <text class="edge-label-teal" x="1080" y="561">private session hostnames</text>
 
-  <rect class="card card-green" x="810" y="355" width="230" height="54" rx="8"/>
-  <use href="#icon-storage" x="826" y="368" width="28" height="24"/>
-  <text class="card-title" x="866" y="378">ADLS Gen2 storage</text>
-  <text class="card-copy" x="866" y="396">Private endpoint only | Shared key disabled</text>
+  <rect class="edge-label-bg" x="1110" y="430" width="120" height="18" rx="4" ry="4"/>
+  <text class="edge-label-blue" x="1170" y="443">cloud + extension</text>
 
-  <rect class="card card-green" x="810" y="420" width="230" height="54" rx="8"/>
-  <use href="#icon-acr" x="826" y="433" width="28" height="24"/>
-  <text class="card-title" x="866" y="443">Azure Container Registry</text>
-  <text class="card-copy" x="866" y="461">Premium | Public network disabled</text>
+  <rect class="card" x="30" y="420" width="150" height="120" rx="10" ry="10"/>
+  <text class="card-title center" x="105" y="450">Admin workstation</text>
+  <text class="card-copy center" x="105" y="473">
+    <tspan x="105" dy="0">Azure CLI + Terraform</tspan>
+    <tspan x="105" dy="18">Anyscale CLI / kubectl</tspan>
+    <tspan x="105" dy="18">Browser + OpenVPN client</tspan>
+  </text>
 
-  <rect class="subnet" x="280" y="430" width="220" height="150" rx="8"/>
-  <text class="subnet-text" x="298" y="456">DNS resolver subnets</text>
-  <text class="subnet-text" x="298" y="474">10.50.1.16/28 and 10.50.1.32/28</text>
-  <rect class="card card-blue" x="300" y="470" width="190" height="80" rx="8"/>
-  <use href="#icon-dns" x="316" y="492" width="28" height="28"/>
-  <text class="card-title" x="354" y="498">DNS Private Resolver</text>
-  <text class="card-copy" x="354" y="517">Hybrid forwarding</text>
-  <text class="card-copy" x="354" y="535">Private Link zones</text>
+  <rect class="subnet" x="280" y="250" width="220" height="150" rx="10" ry="10"/>
+  <text class="subnet-label" x="294" y="270">
+    <tspan x="294" dy="0">AzureBastionSubnet</tspan>
+    <tspan x="294" dy="18">10.50.0.128/26</tspan>
+  </text>
+  <rect class="card card-blue" x="310" y="295" width="160" height="70" rx="10" ry="10"/>
+  <text class="card-title" x="328" y="322">Azure Bastion Standard</text>
+  <text class="card-copy" x="328" y="342">Native client tunnel</text>
 
-  <rect class="subnet" x="530" y="510" width="380" height="190" rx="8"/>
-  <text class="subnet-text" x="548" y="536">AKS node subnet</text>
-  <text class="subnet-text" x="548" y="554">10.50.4.0/22</text>
-  <rect class="card card-blue" x="560" y="560" width="310" height="94" rx="8"/>
-  <use href="#icon-k8s" x="578" y="582" width="30" height="30"/>
-  <text class="card-title" x="620" y="586">Private AKS cluster</text>
-  <text class="card-copy" x="620" y="606">OIDC + workload identity</text>
-  <text class="card-copy" x="620" y="624">System, CPU, and GPU pools</text>
-  <rect class="banner" x="560" y="668" width="310" height="36" rx="8"/>
-  <text class="card-copy-strong" x="715" y="690" text-anchor="middle">Bootstrap: ingress-nginx + NVIDIA plugin | private frontend IP</text>
+  <rect class="subnet" x="540" y="250" width="220" height="150" rx="10" ry="10"/>
+  <text class="subnet-label" x="554" y="270">
+    <tspan x="554" dy="0">AKS API server subnet</tspan>
+    <tspan x="554" dy="18">10.50.1.0/28</tspan>
+  </text>
+  <rect class="card card-blue" x="570" y="295" width="160" height="70" rx="10" ry="10"/>
+  <text class="card-title" x="588" y="322">Private AKS API</text>
+  <text class="card-copy" x="588" y="342">No public endpoint</text>
 
-  <rect class="subnet-orange" x="940" y="515" width="140" height="140" rx="8"/>
-  <text class="subnet-text" x="958" y="541" fill="#9a3412">Azure Firewall subnet</text>
-  <text class="subnet-text" x="958" y="559" fill="#9a3412">10.50.0.0/26</text>
-  <rect class="card card-orange" x="955" y="552" width="110" height="70" rx="8"/>
-  <use href="#icon-firewall" x="969" y="569" width="28" height="24"/>
-  <text class="card-title" x="1005" y="579">Azure Firewall</text>
-  <text class="card-copy" x="1005" y="597">DNS proxy + egress</text>
+  <rect class="subnet" x="800" y="250" width="220" height="150" rx="10" ry="10"/>
+  <text class="subnet-label" x="814" y="270">
+    <tspan x="814" dy="0">GatewaySubnet</tspan>
+    <tspan x="814" dy="18">10.50.1.64/27</tspan>
+  </text>
+  <rect class="card card-teal" x="825" y="282" width="170" height="88" rx="10" ry="10"/>
+  <text class="card-title" x="841" y="308">Azure VPN Gateway</text>
+  <text class="card-copy" x="841" y="328">
+    <tspan x="841" dy="0">P2S OpenVPN + cert auth</tspan>
+    <tspan x="841" dy="18">Client DNS via resolver inbound</tspan>
+  </text>
 
-  <rect class="card card-blue" x="1195" y="300" width="285" height="82" rx="8"/>
-  <text class="card-title" x="1215" y="332">Anyscale platform</text>
-  <text class="card-copy" x="1215" y="352">Azure cloud + AKS extension</text>
-  <text class="card-copy" x="1215" y="370">ARM/AzAPI deployment</text>
+  <rect class="subnet" x="1060" y="230" width="220" height="260" rx="10" ry="10"/>
+  <text class="subnet-label" x="1074" y="250">
+    <tspan x="1074" dy="0">Private endpoint subnet</tspan>
+    <tspan x="1074" dy="18">10.50.2.0/24</tspan>
+  </text>
+  <rect class="card card-green" x="1090" y="278" width="160" height="60" rx="10" ry="10"/>
+  <text class="card-title" x="1108" y="303">Private endpoint hub</text>
+  <text class="card-copy" x="1108" y="322">Blob + DFS + ACR</text>
+  <rect class="card card-green" x="1090" y="353" width="160" height="54" rx="10" ry="10"/>
+  <text class="card-title" x="1108" y="377">ADLS Gen2 storage</text>
+  <text class="card-copy" x="1108" y="394">Private endpoint only</text>
+  <rect class="card card-green" x="1090" y="418" width="160" height="54" rx="10" ry="10"/>
+  <text class="card-title" x="1108" y="442">Azure Container Registry</text>
+  <text class="card-copy" x="1108" y="459">Premium + private link</text>
 
-  <rect class="card card-purple" x="1195" y="395" width="285" height="82" rx="8"/>
-  <use href="#icon-uami" x="1211" y="417" width="28" height="28"/>
-  <text class="card-title" x="1252" y="422">Operator UAMI</text>
-  <text class="card-copy" x="1252" y="442">Federated identity</text>
-  <text class="card-copy" x="1252" y="460">Storage access + platform auth</text>
+  <rect class="subnet" x="280" y="430" width="220" height="150" rx="10" ry="10"/>
+  <text class="subnet-label" x="294" y="450">
+    <tspan x="294" dy="0">DNS resolver subnets</tspan>
+    <tspan x="294" dy="18">10.50.1.16/28 and 10.50.1.32/28</tspan>
+  </text>
+  <rect class="card card-blue" x="300" y="470" width="190" height="80" rx="10" ry="10"/>
+  <text class="card-title" x="318" y="495">DNS Private Resolver</text>
+  <text class="card-copy" x="318" y="515">
+    <tspan x="318" dy="0">Hybrid forwarding</tspan>
+    <tspan x="318" dy="18">Private Link zones</tspan>
+  </text>
 
-  <rect class="card card-orange" x="1195" y="500" width="285" height="92" rx="8"/>
-  <use href="#icon-fwpolicy" x="1211" y="532" width="28" height="22"/>
-  <text class="card-title" x="1252" y="526">Firewall policy / egress</text>
-  <text class="card-copy" x="1252" y="546">Anyscale, marketplace, AKS, and Monitor</text>
-  <text class="card-copy" x="1252" y="564">NVIDIA and registry FQDNs</text>
+  <rect class="subnet" x="540" y="510" width="420" height="200" rx="10" ry="10"/>
+  <text class="subnet-label" x="554" y="530">
+    <tspan x="554" dy="0">AKS node subnet</tspan>
+    <tspan x="554" dy="18">10.50.4.0/22</tspan>
+  </text>
+  <rect class="card card-blue" x="570" y="560" width="360" height="94" rx="10" ry="10"/>
+  <text class="card-title" x="588" y="588">Private AKS cluster</text>
+  <text class="card-copy" x="588" y="608">
+    <tspan x="588" dy="0">OIDC + workload identity</tspan>
+    <tspan x="588" dy="18">System, CPU, and GPU pools</tspan>
+  </text>
+  <rect class="banner" x="570" y="660" width="360" height="44" rx="10" ry="10"/>
+  <text class="card-copy-strong center" x="750" y="680">
+    <tspan x="750" dy="0">ingress-nginx + NVIDIA plugin</tspan>
+    <tspan x="750" dy="18">private session hostnames + private frontend IP</tspan>
+  </text>
 
-  <rect class="card card-teal" x="1195" y="605" width="285" height="82" rx="8"/>
-  <use href="#icon-logs" x="1211" y="627" width="28" height="28"/>
-  <text class="card-title" x="1252" y="632">Log Analytics + AMPLS</text>
-  <text class="card-copy" x="1252" y="652">Container Insights + diagnostics</text>
+  <rect class="subnet-orange" x="1060" y="520" width="220" height="150" rx="10" ry="10"/>
+  <text class="subnet-orange-label" x="1074" y="540">
+    <tspan x="1074" dy="0">Azure Firewall subnet</tspan>
+    <tspan x="1074" dy="18">10.50.0.0/26</tspan>
+  </text>
+  <rect class="card card-orange" x="1090" y="557" width="160" height="70" rx="10" ry="10"/>
+  <text class="card-title" x="1108" y="582">Azure Firewall</text>
+  <text class="card-copy" x="1108" y="602">DNS proxy + egress</text>
 
-  <path class="line-blue" d="M170 480 C 220 480 235 375 310 330"/>
-  <path class="line-blue" d="M470 330 C 500 315 530 315 560 330"/>
-  <path class="line-blue" d="M640 365 C 640 465 610 520 560 607"/>
-  <path class="line-green-dash" d="M490 510 C 520 505 520 430 600 430 C 700 430 730 360 810 310"/>
-  <path class="line-green" d="M870 607 C 980 607 1085 607 1085 520 C 1085 420 1085 330 1040 310"/>
-  <path class="line-orange" d="M870 607 C 905 607 925 607 955 587"/>
-  <path class="line-orange" d="M1065 587 C 1125 587 1135 555 1195 546"/>
+  <rect class="card card-blue" x="1390" y="305" width="280" height="82" rx="10" ry="10"/>
+  <text class="card-title" x="1408" y="330">Anyscale console</text>
+  <text class="card-copy" x="1408" y="350">
+    <tspan x="1408" dy="0">SaaS control plane</tspan>
+    <tspan x="1408" dy="18">Browser auth + cluster_auth</tspan>
+  </text>
 
-  <text class="note" x="40" y="876">DNS path: AKS nodes use Azure Firewall DNS proxy as the VNet DNS server, and DNS Private Resolver handles hybrid forwarding and Private Link zones.</text>
+  <rect class="card card-blue" x="1390" y="405" width="280" height="82" rx="10" ry="10"/>
+  <text class="card-title" x="1408" y="430">Anyscale platform</text>
+  <text class="card-copy" x="1408" y="450">
+    <tspan x="1408" dy="0">Azure cloud resource + AKS extension</tspan>
+    <tspan x="1408" dy="18">ARM / AzAPI deployment</tspan>
+  </text>
+
+  <rect class="card card-purple" x="1390" y="505" width="280" height="82" rx="10" ry="10"/>
+  <text class="card-title" x="1408" y="530">Operator UAMI</text>
+  <text class="card-copy" x="1408" y="550">
+    <tspan x="1408" dy="0">Federated identity</tspan>
+    <tspan x="1408" dy="18">Storage access + platform auth</tspan>
+  </text>
+
+  <rect class="card card-orange" x="1390" y="610" width="280" height="92" rx="10" ry="10"/>
+  <text class="card-title" x="1408" y="636">Firewall policy / egress</text>
+  <text class="card-copy" x="1408" y="656">
+    <tspan x="1408" dy="0">Anyscale, marketplace, AKS, and Monitor</tspan>
+    <tspan x="1408" dy="18">NVIDIA and registry FQDNs</tspan>
+  </text>
+
+  <rect class="card card-teal" x="1390" y="725" width="280" height="82" rx="10" ry="10"/>
+  <text class="card-title" x="1408" y="750">Log Analytics + AMPLS</text>
+  <text class="card-copy" x="1408" y="770">
+    <tspan x="1408" dy="0">Container Insights</tspan>
+    <tspan x="1408" dy="18">Diagnostics and observability</tspan>
+  </text>
+
+  <text class="note" x="40" y="950">
+    <tspan x="40" dy="0">Control-plane admin traffic uses Bastion. Optional P2S client traffic uses the Azure VPN Gateway and DNS Private Resolver inbound endpoint so the local browser can reach private Anyscale session hostnames for console and workspace testing.</tspan>
+  </text>
 </svg>

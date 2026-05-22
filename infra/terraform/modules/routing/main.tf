@@ -22,6 +22,16 @@ resource "azurerm_route" "default_to_firewall" {
   next_hop_in_ip_address = var.firewall_private_ip
 }
 
+resource "azurerm_route" "p2s_to_gateway" {
+  for_each = { for prefix in var.p2s_client_address_prefixes : replace(replace(prefix, ".", "-"), "/", "-") => prefix }
+
+  name                = "p2s-${each.key}"
+  resource_group_name = var.resource_group_name
+  route_table_name    = azurerm_route_table.this.name
+  address_prefix      = each.value
+  next_hop_type       = "VirtualNetworkGateway"
+}
+
 resource "azurerm_subnet_route_table_association" "this" {
   for_each       = var.subnet_ids_to_associate
   subnet_id      = each.value

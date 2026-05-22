@@ -10,6 +10,7 @@ variables {
   environment    = "ci"
   azure_location = "westus3"
   region_short   = "wus3"
+  enable_p2s_vpn = false
 
   vnet_address_space = ["10.50.0.0/16"]
   subnet_cidrs = {

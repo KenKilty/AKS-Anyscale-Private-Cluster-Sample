@@ -15,5 +15,6 @@ output "subnet_ids" {
     private_endpoints = azurerm_subnet.private_endpoints.id
     firewall          = azurerm_subnet.firewall.id
     bastion           = azurerm_subnet.bastion.id
+    gateway           = one(azurerm_subnet.gateway[*].id)
   }
 }

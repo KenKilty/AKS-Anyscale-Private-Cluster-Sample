@@ -37,6 +37,7 @@ SETUP_TIMEOUT_TERRAFORM_TEST_SECONDS="${SETUP_TIMEOUT_TERRAFORM_TEST_SECONDS:-12
 SETUP_TIMEOUT_TERRAFORM_PLAN_SECONDS="${SETUP_TIMEOUT_TERRAFORM_PLAN_SECONDS:-1800}"
 SETUP_TIMEOUT_TERRAFORM_APPLY_SECONDS="${SETUP_TIMEOUT_TERRAFORM_APPLY_SECONDS:-7200}"
 SETUP_TIMEOUT_TERRAFORM_DESTROY_SECONDS="${SETUP_TIMEOUT_TERRAFORM_DESTROY_SECONDS:-7200}"
+SETUP_TIMEOUT_P2S_VPN_PROFILE_SECONDS="${SETUP_TIMEOUT_P2S_VPN_PROFILE_SECONDS:-900}"
 SETUP_TIMEOUT_HELM_SECONDS="${SETUP_TIMEOUT_HELM_SECONDS:-900}"
 SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS="${SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS:-180}"
 SETUP_TIMEOUT_ANYSCALE_WORKSPACE_WAIT_SECONDS="${SETUP_TIMEOUT_ANYSCALE_WORKSPACE_WAIT_SECONDS:-1800}"
@@ -44,6 +45,10 @@ SETUP_TIMEOUT_ANYSCALE_WORKSPACE_COMMAND_SECONDS="${SETUP_TIMEOUT_ANYSCALE_WORKS
 SETUP_TIMEOUT_AZURE_EXTENSION_SECONDS="${SETUP_TIMEOUT_AZURE_EXTENSION_SECONDS:-300}"
 SETUP_TIMEOUT_AZURE_COMMAND_SECONDS="${SETUP_TIMEOUT_AZURE_COMMAND_SECONDS:-180}"
 SETUP_TIMEOUT_KUBECTL_READY_SECONDS="${SETUP_TIMEOUT_KUBECTL_READY_SECONDS:-20}"
+
+P2S_DEFAULT_GATEWAY_SUBNET_CIDR="10.50.1.64/27"
+P2S_DEFAULT_CLIENT_ADDRESS_SPACE='["172.16.201.0/24"]'
+P2S_DEFAULT_GATEWAY_SKU="VpnGw1AZ"
 
 FOCUSED_VALIDATION_RUN_ID=""
 FOCUSED_VALIDATION_RESULTS=()
@@ -295,6 +300,464 @@ require_env_var() {
   [[ -n "${!name:-}" ]] || die "Missing required environment variable ${name} in ${ENV_FILE}."
 }
 
+p2s_vpn_enabled() {
+  [[ "${TF_VAR_enable_p2s_vpn:-false}" == "true" ]]
+}
+
+p2s_vpn_artifact_dir() {
+  ensure_harness_dir
+  printf '%s/p2s-vpn\n' "${HARNESS_DIR}"
+}
+
+p2s_vpn_cert_dir() {
+  printf '%s/certs\n' "$(p2s_vpn_artifact_dir)"
+}
+
+p2s_vpn_package_zip_path() {
+  printf '%s/azure-vpn-client-profile.zip\n' "$(p2s_vpn_artifact_dir)"
+}
+
+p2s_vpn_unpack_dir() {
+  printf '%s/unpacked\n' "$(p2s_vpn_artifact_dir)"
+}
+
+p2s_vpn_ready_ovpn_path() {
+  printf '%s/openvpn-ready.ovpn\n' "$(p2s_vpn_artifact_dir)"
+}
+
+p2s_vpn_summary_path() {
+  printf '%s/README.txt\n' "$(p2s_vpn_artifact_dir)"
+}
+
+p2s_vpn_lab_root_name() {
+  printf '%s-%s-%s-p2s-root\n' \
+    "${TF_VAR_project}" \
+    "${TF_VAR_environment}" \
+    "${TF_VAR_region_short}"
+}
+
+p2s_vpn_lab_client_name() {
+  printf '%s-%s-%s-p2s-operator\n' \
+    "${TF_VAR_project}" \
+    "${TF_VAR_environment}" \
+    "${TF_VAR_region_short}"
+}
+
+p2s_vpn_lab_root_key_path() {
+  printf '%s/%s.key\n' "$(p2s_vpn_cert_dir)" "$(p2s_vpn_lab_root_name)"
+}
+
+p2s_vpn_lab_root_cert_path() {
+  printf '%s/%s.crt\n' "$(p2s_vpn_cert_dir)" "$(p2s_vpn_lab_root_name)"
+}
+
+p2s_vpn_lab_client_key_path() {
+  printf '%s/%s.key\n' "$(p2s_vpn_cert_dir)" "$(p2s_vpn_lab_client_name)"
+}
+
+p2s_vpn_lab_client_csr_path() {
+  printf '%s/%s.csr\n' "$(p2s_vpn_cert_dir)" "$(p2s_vpn_lab_client_name)"
+}
+
+p2s_vpn_lab_client_cert_path() {
+  printf '%s/%s.crt\n' "$(p2s_vpn_cert_dir)" "$(p2s_vpn_lab_client_name)"
+}
+
+p2s_vpn_lab_client_p12_path() {
+  printf '%s/%s.p12\n' "$(p2s_vpn_cert_dir)" "$(p2s_vpn_lab_client_name)"
+}
+
+p2s_vpn_lab_client_extfile_path() {
+  printf '%s/%s.ext\n' "$(p2s_vpn_cert_dir)" "$(p2s_vpn_lab_client_name)"
+}
+
+p2s_vpn_lab_serial_path() {
+  printf '%s/%s.srl\n' "$(p2s_vpn_cert_dir)" "$(p2s_vpn_lab_root_name)"
+}
+
+render_p2s_trusted_root_certificates_json() {
+  local certificate_name="$1"
+  local certificate_path="$2"
+
+  python3 - "${certificate_name}" "${certificate_path}" <<'PY'
+import json
+import pathlib
+import sys
+
+name = sys.argv[1]
+certificate_path = pathlib.Path(sys.argv[2])
+body = "".join(
+    line.strip()
+    for line in certificate_path.read_text().splitlines()
+    if "BEGIN CERTIFICATE" not in line and "END CERTIFICATE" not in line and line.strip()
+)
+print(json.dumps([{"name": name, "public_cert_data": body}], separators=(",", ":")))
+PY
+}
+
+ensure_p2s_subnet_defaults() {
+  p2s_vpn_enabled || return 0
+
+  TF_VAR_subnet_cidrs="$(jq -c --arg gateway_cidr "${P2S_DEFAULT_GATEWAY_SUBNET_CIDR}" '. + {gateway: (.gateway // $gateway_cidr)}' <<<"${TF_VAR_subnet_cidrs}")"
+  export TF_VAR_subnet_cidrs
+}
+
+ensure_p2s_lab_certificates() {
+  local cert_dir root_name client_name root_key_path root_cert_path client_key_path client_csr_path client_cert_path client_p12_path client_extfile_path serial_path previous_umask
+
+  p2s_vpn_enabled || return 0
+
+  if [[ -n "${TF_VAR_p2s_trusted_root_certificates:-}" && "${TF_VAR_p2s_trusted_root_certificates}" != "[]" ]]; then
+    return 0
+  fi
+
+  require_cmd openssl
+  require_cmd python3
+
+  cert_dir="$(p2s_vpn_cert_dir)"
+  root_name="$(p2s_vpn_lab_root_name)"
+  client_name="$(p2s_vpn_lab_client_name)"
+  root_key_path="$(p2s_vpn_lab_root_key_path)"
+  root_cert_path="$(p2s_vpn_lab_root_cert_path)"
+  client_key_path="$(p2s_vpn_lab_client_key_path)"
+  client_csr_path="$(p2s_vpn_lab_client_csr_path)"
+  client_cert_path="$(p2s_vpn_lab_client_cert_path)"
+  client_p12_path="$(p2s_vpn_lab_client_p12_path)"
+  client_extfile_path="$(p2s_vpn_lab_client_extfile_path)"
+  serial_path="$(p2s_vpn_lab_serial_path)"
+
+  mkdir -p "${cert_dir}"
+  previous_umask="$(umask)"
+  umask 077
+
+  if [[ ! -s "${root_key_path}" || ! -s "${root_cert_path}" ]]; then
+    log "Generating local lab root certificate for P2S VPN under ${cert_dir}"
+    openssl req -x509 -nodes -newkey rsa:2048 \
+      -keyout "${root_key_path}" \
+      -out "${root_cert_path}" \
+      -days 3650 \
+      -sha256 \
+      -subj "/CN=${root_name}" >/dev/null 2>&1
+  fi
+
+  if [[ ! -s "${client_key_path}" || ! -s "${client_cert_path}" ]]; then
+    log "Generating local lab client certificate for P2S VPN under ${cert_dir}"
+    openssl req -nodes -newkey rsa:2048 \
+      -keyout "${client_key_path}" \
+      -out "${client_csr_path}" \
+      -subj "/CN=${client_name}" >/dev/null 2>&1
+
+    cat > "${client_extfile_path}" <<'EOF'
+basicConstraints=CA:FALSE
+extendedKeyUsage=clientAuth
+keyUsage=digitalSignature,keyEncipherment
+subjectKeyIdentifier=hash
+authorityKeyIdentifier=keyid,issuer
+EOF
+
+    openssl x509 -req \
+      -in "${client_csr_path}" \
+      -CA "${root_cert_path}" \
+      -CAkey "${root_key_path}" \
+      -CAcreateserial \
+      -CAserial "${serial_path}" \
+      -out "${client_cert_path}" \
+      -days 825 \
+      -sha256 \
+      -extfile "${client_extfile_path}" >/dev/null 2>&1
+  fi
+
+  if [[ ! -s "${client_p12_path}" ]]; then
+    openssl pkcs12 -export \
+      -inkey "${client_key_path}" \
+      -in "${client_cert_path}" \
+      -certfile "${root_cert_path}" \
+      -out "${client_p12_path}" \
+      -passout pass: >/dev/null 2>&1
+  fi
+
+  umask "${previous_umask}"
+
+  TF_VAR_p2s_trusted_root_certificates="$(render_p2s_trusted_root_certificates_json "${root_name}" "${root_cert_path}")"
+  export TF_VAR_p2s_trusted_root_certificates
+}
+
+find_p2s_openvpn_profile() {
+  local unpack_dir="$1"
+  find "${unpack_dir}" -type f -name '*.ovpn' | LC_ALL=C sort | head -n1
+}
+
+extract_first_url_from_json() {
+  local raw_payload
+
+  raw_payload="$(cat)"
+
+  python3 - "${raw_payload}" <<'PY'
+import json
+import re
+import sys
+
+raw_payload = sys.argv[1].strip()
+if not raw_payload:
+    raise SystemExit(1)
+
+if re.match(r"^https?://", raw_payload):
+    print(raw_payload)
+    raise SystemExit(0)
+
+try:
+    payload = json.loads(raw_payload)
+except json.JSONDecodeError:
+    match = re.search(r"https?://\S+", raw_payload)
+    if match:
+        print(match.group(0).rstrip('"\','))
+        raise SystemExit(0)
+    raise SystemExit(1)
+
+queue = [payload]
+while queue:
+  current = queue.pop(0)
+  if isinstance(current, dict):
+    queue.extend(current.values())
+    continue
+  if isinstance(current, list):
+    queue.extend(current)
+    continue
+  if isinstance(current, str) and re.match(r"^https?://", current.strip()):
+    print(current.strip())
+    raise SystemExit(0)
+
+raise SystemExit(1)
+PY
+}
+
+download_and_unpack_p2s_profile() {
+  local profile_url="$1"
+  local zip_path unpack_dir
+
+  zip_path="$(p2s_vpn_package_zip_path)"
+  unpack_dir="$(p2s_vpn_unpack_dir)"
+  mkdir -p "$(p2s_vpn_artifact_dir)"
+
+  python3 - "${profile_url}" "${zip_path}" "${unpack_dir}" <<'PY'
+import pathlib
+import shutil
+import sys
+import urllib.request
+import zipfile
+
+profile_url = sys.argv[1]
+zip_path = pathlib.Path(sys.argv[2])
+unpack_dir = pathlib.Path(sys.argv[3])
+
+zip_path.parent.mkdir(parents=True, exist_ok=True)
+urllib.request.urlretrieve(profile_url, zip_path)
+
+if unpack_dir.exists():
+    shutil.rmtree(unpack_dir)
+unpack_dir.mkdir(parents=True, exist_ok=True)
+
+with zipfile.ZipFile(zip_path) as archive:
+    archive.extractall(unpack_dir)
+PY
+}
+
+build_ready_openvpn_profile() {
+  local source_profile_path="$1"
+  local output_profile_path="$2"
+  local dns_servers_json="$3"
+  local client_cert_path="$4"
+  local client_key_path="$5"
+  local root_cert_path="$6"
+
+  python3 - "${source_profile_path}" "${output_profile_path}" "${dns_servers_json}" "${client_cert_path}" "${client_key_path}" "${root_cert_path}" <<'PY'
+import json
+import pathlib
+import sys
+
+source_path = pathlib.Path(sys.argv[1])
+output_path = pathlib.Path(sys.argv[2])
+dns_servers = json.loads(sys.argv[3])
+client_cert_path = pathlib.Path(sys.argv[4])
+client_key_path = pathlib.Path(sys.argv[5])
+root_cert_path = pathlib.Path(sys.argv[6])
+
+source_lines = source_path.read_text().splitlines()
+result_lines = []
+skip_block = None
+
+for line in source_lines:
+    stripped = line.strip()
+
+    if skip_block is not None:
+        if stripped == f"</{skip_block}>":
+            skip_block = None
+        continue
+
+    if stripped in {"<cert>", "<key>"}:
+        skip_block = stripped[1:-1]
+        continue
+
+    if stripped == "persist-key":
+      continue
+
+    if stripped.startswith("cert ") or stripped.startswith("key ") or stripped.startswith("dhcp-option DNS "):
+        continue
+
+    result_lines.append(line)
+
+for dns_server in dns_servers:
+    result_lines.append(f"dhcp-option DNS {dns_server}")
+
+has_ca_block = any(line.strip() == "<ca>" or line.strip().startswith("ca ") for line in result_lines)
+if not has_ca_block and root_cert_path.exists():
+    result_lines.append("<ca>")
+    result_lines.extend(root_cert_path.read_text().splitlines())
+    result_lines.append("</ca>")
+
+if client_cert_path.exists() and client_key_path.exists():
+    result_lines.append("<cert>")
+    result_lines.extend(client_cert_path.read_text().splitlines())
+    result_lines.append("</cert>")
+    result_lines.append("<key>")
+    result_lines.extend(client_key_path.read_text().splitlines())
+    result_lines.append("</key>")
+
+output_path.parent.mkdir(parents=True, exist_ok=True)
+output_path.write_text("\n".join(result_lines) + "\n")
+PY
+}
+
+write_p2s_vpn_summary() {
+  local profile_url="$1"
+  local source_profile_path="$2"
+  local dns_servers_json="$3"
+  local client_address_space_json="$4"
+  local resource_group="$5"
+  local gateway_name="$6"
+  local summary_path artifact_dir ready_profile client_p12_path client_cert_path client_key_path root_cert_path
+
+  summary_path="$(p2s_vpn_summary_path)"
+  artifact_dir="$(p2s_vpn_artifact_dir)"
+  ready_profile="$(p2s_vpn_ready_ovpn_path)"
+  client_p12_path="$(p2s_vpn_lab_client_p12_path)"
+  client_cert_path="$(p2s_vpn_lab_client_cert_path)"
+  client_key_path="$(p2s_vpn_lab_client_key_path)"
+  root_cert_path="$(p2s_vpn_lab_root_cert_path)"
+
+  {
+    printf 'Azure P2S VPN artifacts\n'
+    printf '======================\n\n'
+    printf 'Resource group: %s\n' "${resource_group}"
+    printf 'VPN gateway:    %s\n' "${gateway_name}"
+    printf 'Profile URL:    %s\n\n' "${profile_url}"
+    printf 'Artifact directory: %s\n' "${artifact_dir}"
+    printf 'Downloaded zip:     %s\n' "$(p2s_vpn_package_zip_path)"
+    printf 'Unpacked package:   %s\n' "$(p2s_vpn_unpack_dir)"
+    printf 'Source .ovpn:       %s\n' "${source_profile_path:-<not found>}"
+    printf 'Ready .ovpn:        %s\n\n' "${ready_profile}"
+    printf 'Client address pool: %s\n' "$(jq -r 'join(", ")' <<<"${client_address_space_json}")"
+    printf 'Client DNS servers:  %s\n\n' "$(jq -r 'join(", ")' <<<"${dns_servers_json}")"
+
+    if [[ -f "${client_cert_path}" && -f "${client_key_path}" ]]; then
+      printf 'Local lab client certificate: %s\n' "${client_cert_path}"
+      printf 'Local lab client key:         %s\n' "${client_key_path}"
+      printf 'Local lab PKCS#12 bundle:     %s\n' "${client_p12_path}"
+      printf 'Local lab root certificate:   %s\n\n' "${root_cert_path}"
+      printf 'macOS/OpenVPN path:\n'
+      printf '  Import %s into Tunnelblick or OpenVPN Connect.\n\n' "${ready_profile}"
+    else
+      printf 'No local lab client certificate was generated because a custom TF_VAR_p2s_trusted_root_certificates value was supplied.\n'
+      printf 'Provide a client certificate that chains to the configured root before importing %s.\n\n' "${ready_profile}"
+    fi
+
+    printf 'Regenerate the Azure package later with:\n'
+    printf '  az network vnet-gateway vpn-client generate -g %s -n %s --authentication-method EAPTLS --processor-architecture Amd64\n' "${resource_group}" "${gateway_name}"
+  } > "${summary_path}"
+}
+
+generate_p2s_vpn_artifacts() {
+  local contract_json enabled resource_group gateway_name dns_servers_json client_address_space_json generate_json show_url_json profile_url source_profile ready_profile client_cert_path client_key_path root_cert_path
+
+  load_env
+  sync_anyscale_cli_env
+  require_cmd az
+  require_cmd jq
+  require_cmd python3
+
+  contract_json="$(terraform output -json p2s_vpn_contract 2>/dev/null || true)"
+  [[ -n "${contract_json}" ]] || {
+    log "Terraform output p2s_vpn_contract is not available yet. Skipping VPN client artifacts."
+    return 0
+  }
+
+  enabled="$(jq -r '.enabled // false' <<<"${contract_json}")"
+  if [[ "${enabled}" != "true" ]]; then
+    log "P2S VPN is disabled. Skipping VPN client artifact generation."
+    return 0
+  fi
+
+  ensure_p2s_lab_certificates
+
+  resource_group="$(terraform_output_raw resource_group_name)"
+  gateway_name="$(terraform_output_raw vpn_gateway_name)"
+  dns_servers_json="$(jq -c '.client_dns_servers // []' <<<"${contract_json}")"
+  client_address_space_json="$(jq -c '.client_address_space // []' <<<"${contract_json}")"
+
+  [[ -n "${resource_group}" && -n "${gateway_name}" && "${gateway_name}" != "null" ]] || die "P2S VPN is enabled, but Terraform outputs are missing the VPN gateway identity."
+
+  log "Generating Azure VPN client package for gateway ${gateway_name}"
+  generate_json="$(run_with_timeout "${SETUP_TIMEOUT_P2S_VPN_PROFILE_SECONDS}" az network vnet-gateway vpn-client generate \
+    --resource-group "${resource_group}" \
+    --name "${gateway_name}" \
+    --authentication-method EAPTLS \
+    --processor-architecture Amd64 \
+    --output json \
+    --only-show-errors)"
+  profile_url="$(extract_first_url_from_json <<<"${generate_json}" || true)"
+
+  if [[ -z "${profile_url}" ]]; then
+    log "Azure CLI did not return a profile URL directly; retrying with show-url"
+    show_url_json="$(run_with_timeout "${SETUP_TIMEOUT_P2S_VPN_PROFILE_SECONDS}" az network vnet-gateway vpn-client show-url \
+      --resource-group "${resource_group}" \
+      --name "${gateway_name}" \
+      --output json \
+      --only-show-errors)"
+    profile_url="$(extract_first_url_from_json <<<"${show_url_json}" || true)"
+  fi
+
+  [[ -n "${profile_url}" ]] || die "Azure CLI did not return a VPN client profile URL for gateway ${gateway_name}."
+
+  download_and_unpack_p2s_profile "${profile_url}"
+
+  source_profile="$(find_p2s_openvpn_profile "$(p2s_vpn_unpack_dir)" || true)"
+  [[ -n "${source_profile}" ]] || die "Downloaded Azure VPN client package does not contain an .ovpn profile."
+
+  ready_profile="$(p2s_vpn_ready_ovpn_path)"
+  client_cert_path="$(p2s_vpn_lab_client_cert_path)"
+  client_key_path="$(p2s_vpn_lab_client_key_path)"
+  root_cert_path="$(p2s_vpn_lab_root_cert_path)"
+
+  build_ready_openvpn_profile \
+    "${source_profile}" \
+    "${ready_profile}" \
+    "${dns_servers_json}" \
+    "${client_cert_path}" \
+    "${client_key_path}" \
+    "${root_cert_path}"
+
+  write_p2s_vpn_summary \
+    "${profile_url}" \
+    "${source_profile}" \
+    "${dns_servers_json}" \
+    "${client_address_space_json}" \
+    "${resource_group}" \
+    "${gateway_name}"
+
+  log "P2S VPN artifacts are ready under $(p2s_vpn_artifact_dir)"
+  log "Use $(p2s_vpn_ready_ovpn_path) with an OpenVPN client on macOS or Linux."
+}
+
 render_tfvars() {
   load_env
 
@@ -348,8 +811,22 @@ render_tfvars() {
     require_env_var "${env_name}"
   done
 
+  TF_VAR_enable_p2s_vpn="${TF_VAR_enable_p2s_vpn:-false}"
+  TF_VAR_vpn_gateway_sku="${TF_VAR_vpn_gateway_sku:-${P2S_DEFAULT_GATEWAY_SKU}}"
+  TF_VAR_p2s_client_address_space="${TF_VAR_p2s_client_address_space:-${P2S_DEFAULT_CLIENT_ADDRESS_SPACE}}"
+  TF_VAR_p2s_client_dns_servers="${TF_VAR_p2s_client_dns_servers:-[]}"
+  TF_VAR_p2s_trusted_root_certificates="${TF_VAR_p2s_trusted_root_certificates:-[]}"
+
+  export TF_VAR_enable_p2s_vpn
+  export TF_VAR_vpn_gateway_sku
+  export TF_VAR_p2s_client_address_space
+  export TF_VAR_p2s_client_dns_servers
+  export TF_VAR_p2s_trusted_root_certificates
+
   normalize_gpu_pool_configs_min_count
   sync_anyscale_cli_env
+  ensure_p2s_subnet_defaults
+  ensure_p2s_lab_certificates
 
   if [[ -z "${TF_VAR_anyscale_cli_token:-}" && -n "${ANYSCALE_CLI_TOKEN:-}" ]]; then
     TF_VAR_anyscale_cli_token="${ANYSCALE_CLI_TOKEN}"
@@ -363,6 +840,8 @@ render_tfvars() {
     --arg environment "${TF_VAR_environment}" \
     --arg azure_location "${TF_VAR_azure_location}" \
     --arg region_short "${TF_VAR_region_short}" \
+    --argjson enable_p2s_vpn "${TF_VAR_enable_p2s_vpn}" \
+    --arg vpn_gateway_sku "${TF_VAR_vpn_gateway_sku}" \
     --arg aks_sku_tier "${TF_VAR_aks_sku_tier}" \
     --arg system_vm_size "${TF_VAR_system_vm_size}" \
     --arg cpu_vm_size "${TF_VAR_cpu_vm_size}" \
@@ -398,6 +877,9 @@ render_tfvars() {
     --argjson container_insights_streams "${TF_VAR_container_insights_streams}" \
     --argjson container_insights_namespaces "${TF_VAR_container_insights_namespaces}" \
     --argjson terraform_managed_diagnostic_settings_enabled "${TF_VAR_terraform_managed_diagnostic_settings_enabled}" \
+    --argjson p2s_client_address_space "${TF_VAR_p2s_client_address_space}" \
+    --argjson p2s_client_dns_servers "${TF_VAR_p2s_client_dns_servers}" \
+    --argjson p2s_trusted_root_certificates "${TF_VAR_p2s_trusted_root_certificates}" \
     --argjson tags "${TF_VAR_tags}" \
     --arg anyscale_cli_token "${TF_VAR_anyscale_cli_token:-}" \
     '{
@@ -407,6 +889,8 @@ render_tfvars() {
       environment: $environment,
       azure_location: $azure_location,
       region_short: $region_short,
+      enable_p2s_vpn: $enable_p2s_vpn,
+      vpn_gateway_sku: $vpn_gateway_sku,
       aks_sku_tier: $aks_sku_tier,
       system_vm_size: $system_vm_size,
       cpu_vm_size: $cpu_vm_size,
@@ -442,6 +926,9 @@ render_tfvars() {
       container_insights_streams: $container_insights_streams,
       container_insights_namespaces: $container_insights_namespaces,
       terraform_managed_diagnostic_settings_enabled: $terraform_managed_diagnostic_settings_enabled,
+      p2s_client_address_space: $p2s_client_address_space,
+      p2s_client_dns_servers: $p2s_client_dns_servers,
+      p2s_trusted_root_certificates: $p2s_trusted_root_certificates,
       tags: $tags,
       anyscale_cli_token: (if $anyscale_cli_token == "" then null else $anyscale_cli_token end)
     }' > "${GENERATED_TFVARS}"
@@ -451,6 +938,10 @@ render_tfvars() {
 
 terraform_output_raw() {
   terraform output -raw "$1"
+}
+
+terraform_output_json() {
+  terraform output -json "$1"
 }
 
 anyscale_platform_deployment_name() {
@@ -2772,6 +3263,10 @@ deploy_platform_stage() {
   deploy_e2e_phase2
 }
 
+deploy_p2s_vpn_stage() {
+  generate_p2s_vpn_artifacts
+}
+
 deploy_workspaces_stage() {
   ensure_deploy_e2e_bastion_access
   anyscale_workspaces_register
@@ -2817,12 +3312,13 @@ USAGE
   DEPLOY_E2E_STARTED_TUNNEL=0
   trap deploy_e2e_cleanup EXIT
 
-  setup_run_init "deploy" 7
+  setup_run_init "deploy" 8
   run_stage "prepare" deploy_prepare_stage
   run_stage "reset-or-state" deploy_reset_stage
   run_stage "terraform-init-validate" deploy_init_validate_stage
   run_stage "foundation" deploy_foundation_stage
   run_stage "platform" deploy_platform_stage
+  run_stage "vpn-profile" deploy_p2s_vpn_stage
   run_stage "workspaces" deploy_workspaces_stage
   run_stage "health" deploy_health_stage
   setup_run_summary
@@ -2956,6 +3452,21 @@ status() {
   printf '  VNet DNS servers:             %s\n' "$(terraform output -json vnet_dns_servers | jq -r 'join(", ")')"
   printf '  DNS resolver inbound IP:      %s\n' "$(terraform output -raw dns_resolver_inbound_endpoint_ip)"
   printf '  Azure Firewall private IP:    %s\n' "$(terraform output -raw firewall_private_ip)"
+
+  local p2s_vpn_contract p2s_enabled
+  p2s_vpn_contract="$(terraform output -json p2s_vpn_contract 2>/dev/null || true)"
+  p2s_enabled="$(jq -r '.enabled // false' <<<"${p2s_vpn_contract:-null}" 2>/dev/null || echo "false")"
+  if [[ "${p2s_enabled}" == "true" ]]; then
+    log "Point-to-Site VPN"
+    printf '  VPN gateway:                  %s\n' "$(jq -r '.gateway_name // "<unknown>"' <<<"${p2s_vpn_contract}")"
+    printf '  VPN public IP:                %s\n' "$(terraform output -raw vpn_gateway_public_ip 2>/dev/null || echo "<pending>")"
+    printf '  P2S client pool:              %s\n' "$(jq -r '.client_address_space | join(", ")' <<<"${p2s_vpn_contract}")"
+    printf '  P2S client DNS:               %s\n' "$(jq -r '.client_dns_servers | join(", ")' <<<"${p2s_vpn_contract}")"
+    if [[ -f "$(p2s_vpn_ready_ovpn_path)" ]]; then
+      printf '  Ready OpenVPN profile:        %s\n' "$(p2s_vpn_ready_ovpn_path)"
+      printf '  VPN artifact summary:         %s\n' "$(p2s_vpn_summary_path)"
+    fi
+  fi
 
   if kubectl get nodes --request-timeout=15s >/dev/null 2>&1; then
     log "Kubernetes nodes"
@@ -6058,11 +6569,33 @@ wait_for_resource_group_deletion() {
   local resource_group="$1"
   local max_attempts="${2:-180}"
   local attempt=1
+  local remaining_count=""
+  local remaining_names=""
 
   while (( attempt <= max_attempts )); do
     if [[ "$(az group exists --name "${resource_group}" --output tsv --only-show-errors 2>/dev/null || printf 'true')" == "false" ]]; then
       return 0
     fi
+
+    if (( attempt == 1 || attempt % 6 == 0 )); then
+      remaining_count="$(az resource list \
+        --resource-group "${resource_group}" \
+        --query 'length(@)' \
+        --output tsv \
+        --only-show-errors 2>/dev/null || true)"
+
+      if [[ -n "${remaining_count}" && "${remaining_count}" != "0" ]]; then
+        remaining_names="$(az resource list \
+          --resource-group "${resource_group}" \
+          --query '[0:5].name' \
+          --output tsv \
+          --only-show-errors 2>/dev/null | paste -sd ', ' - || true)"
+        log "Still waiting for ${resource_group} deletion (${remaining_count} resources remain${remaining_names:+: ${remaining_names}})"
+      else
+        log "Still waiting for ${resource_group} deletion"
+      fi
+    fi
+
     sleep 10
     ((attempt++))
   done

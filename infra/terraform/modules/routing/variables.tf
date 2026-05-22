@@ -23,3 +23,9 @@ variable "subnet_ids_to_associate" {
   description = "Map of subnet logical name -> subnet ID to associate with this route table."
   type        = map(string)
 }
+
+variable "p2s_client_address_prefixes" {
+  description = "Optional P2S client address prefixes that should route back to the virtual network gateway."
+  type        = list(string)
+  default     = []
+}

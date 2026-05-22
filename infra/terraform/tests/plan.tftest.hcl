@@ -13,6 +13,7 @@ variables {
   environment    = "ci"
   azure_location = "westus3"
   region_short   = "wus3"
+  enable_p2s_vpn = false
 
   vnet_address_space = ["10.50.0.0/16"]
   subnet_cidrs = {
@@ -174,5 +175,49 @@ run "anyscale_platform_native_extension_contract" {
   assert {
     condition     = output.anyscale_platform_contract.enabled == true && output.anyscale_platform_contract.extension_release_train == "Stable" && output.anyscale_platform_contract.extension_management_mode == "azurerm_kubernetes_cluster_extension" && output.anyscale_platform_contract.teardown.runtime_termination_timeout_seconds == 900 && output.anyscale_platform_contract.teardown.poll_interval_seconds == 20
     error_message = "The enabled platform contract must normalize the release train for the native azurerm AKS extension resource and keep the runtime-drain cloud teardown defaults stable."
+  }
+}
+
+run "p2s_certificate_vpn_contract" {
+  command = plan
+
+  variables {
+    enable_p2s_vpn = true
+    subnet_cidrs = {
+      firewall          = "10.50.0.0/26"
+      bastion           = "10.50.0.128/26"
+      aks_apiserver     = "10.50.1.0/28"
+      dns_resolver_in   = "10.50.1.16/28"
+      dns_resolver_out  = "10.50.1.32/28"
+      gateway           = "10.50.1.64/27"
+      private_endpoints = "10.50.2.0/24"
+      aks_nodes         = "10.50.4.0/22"
+    }
+    p2s_trusted_root_certificates = [
+      {
+        name             = "lab-root"
+        public_cert_data = "MIIDuzCCAqOgAwIBAgIQCHTZWCMIlfFIRXIvyKSrjANBgkqhkiG9w0BAQsFADBnMQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYDVQQLExB3d3cuZGlnaWNlcnQuY29tMSYwJAYDVQQDEx1EaWdpQ2VydCBGZWRlcmF0ZWQgSUQgUm9vdCBDQTAeFw0xMzAxMTUxMjAwMDBaFw0zMzAxMTUxMjAwMDBaMGcxCzAJBgNVBAYTAlVT"
+      }
+    ]
+  }
+
+  assert {
+    condition     = output.p2s_vpn_contract.enabled == true && output.p2s_vpn_contract.sku == "VpnGw1AZ"
+    error_message = "P2S VPN contract must enable a VpnGw1AZ gateway by default when requested."
+  }
+
+  assert {
+    condition     = contains(output.p2s_vpn_contract.client_address_space, "172.16.201.0/24") && contains(output.p2s_vpn_contract.trusted_root_certificates, "lab-root")
+    error_message = "P2S VPN must keep the default client address pool and surface the configured trusted root certificate."
+  }
+
+  assert {
+    condition     = output.p2s_vpn_contract.client_dns_servers[0] == "10.50.1.20"
+    error_message = "P2S VPN client DNS should default to the DNS Private Resolver inbound endpoint."
+  }
+
+  assert {
+    condition     = contains(output.private_mode_validation.routing.p2s_client_address_prefixes, "172.16.201.0/24") && output.private_mode_validation.routing.p2s_client_next_hop_type == "VirtualNetworkGateway"
+    error_message = "AKS node routing must add an explicit return route from the P2S client pool to the virtual network gateway."
   }
 }

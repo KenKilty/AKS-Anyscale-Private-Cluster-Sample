@@ -17,12 +17,14 @@ locals {
     # Azure-required fixed names:
     subnet_firewall = "AzureFirewallSubnet"
     subnet_bastion  = "AzureBastionSubnet"
+    subnet_gateway  = "GatewaySubnet"
 
     nsg_aks_nodes     = "nsg-aks-nodes-${local.suffix}"
     nsg_pe            = "nsg-pe-${local.suffix}"
     route_table_aks   = "rt-aks-${local.suffix}"
     pip_firewall      = "pip-afw-${local.suffix}"
     pip_bastion       = "pip-bas-${local.suffix}"
+    pip_vpn_gateway   = "pip-vpngw-${local.suffix}"
     firewall          = "afw-${local.suffix}"
     firewall_policy   = "afwp-${local.suffix}"
     firewall_rcg      = "afwp-rcg-${local.suffix}"
@@ -31,6 +33,7 @@ locals {
     dns_resolver_out  = "out-dnspr-${local.suffix}"
     dns_forwarding_rs = "dnsfwdrs-${local.suffix}"
     bastion           = "bas-${local.suffix}"
+    vpn_gateway       = "vpngw-${local.suffix}"
     aks               = "aks-${local.suffix}"
     aks_dns_prefix    = "aks-${local.suffix}"
     log_analytics     = "log-${local.suffix}"

@@ -16,6 +16,7 @@ variable "subnet_cidrs" {
     dns_resolver_out  = string
     private_endpoints = string
     aks_nodes         = string
+    gateway           = optional(string)
   })
 }
 
@@ -28,6 +29,7 @@ variable "subnet_names" {
     private_endpoints = string
     firewall          = string
     bastion           = string
+    gateway           = string
   })
 }
 
