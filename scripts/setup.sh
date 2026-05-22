@@ -5413,6 +5413,105 @@ wait_for_anyscale_service_ready() {
   done
 }
 
+wait_for_anyscale_service_terminated() {
+  local cli_bin="$1"
+  local service_name="$2"
+  local cloud_name="$3"
+  local timeout_seconds="$4"
+  local wait_log="$5"
+  local status_log="$6"
+  local start_epoch current_epoch service_state tmp_status_log
+
+  start_epoch="$(date +%s)"
+  : > "${wait_log}"
+
+  while true; do
+    tmp_status_log="${status_log}.tmp"
+    if run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS}" \
+      "${cli_bin}" service status \
+        --name "${service_name}" \
+        --cloud "${cloud_name}" \
+        --json \
+        --verbose \
+      > "${tmp_status_log}" 2>&1; then
+      mv "${tmp_status_log}" "${status_log}"
+      service_state="$(jq -r '.state // ""' "${status_log}")"
+      printf 'service_state=%s\n' "${service_state}" | tee -a "${wait_log}"
+      case "${service_state}" in
+        TERMINATED|SYSTEM_FAILURE)
+          return 0
+          ;;
+      esac
+    else
+      if [[ -f "${tmp_status_log}" ]]; then
+        cat "${tmp_status_log}" >> "${wait_log}"
+        mv "${tmp_status_log}" "${status_log}"
+      fi
+      if grep -Eiq 'not found|does not exist|404' "${status_log}" 2>/dev/null; then
+        return 0
+      fi
+    fi
+
+    current_epoch="$(date +%s)"
+    if (( current_epoch - start_epoch >= timeout_seconds )); then
+      die "Service ${service_name} did not terminate within ${timeout_seconds}s. See ${wait_log} and ${status_log}."
+    fi
+
+    sleep 10
+  done
+}
+
+terminate_anyscale_service_if_present() {
+  local cli_bin="$1"
+  local service_name="$2"
+  local cloud_name="$3"
+  local status_log="$4"
+  local terminate_log="$5"
+  local service_id service_state output
+
+  : > "${terminate_log}"
+
+  if ! run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS}" \
+    "${cli_bin}" service status \
+      --name "${service_name}" \
+      --cloud "${cloud_name}" \
+      --json \
+      --verbose \
+    > "${status_log}" 2>&1; then
+    return 0
+  fi
+
+  service_id="$(jq -r '.id // ""' "${status_log}")"
+  service_state="$(jq -r '.state // ""' "${status_log}")"
+  [[ -n "${service_id}" ]] || return 0
+
+  case "${service_state}" in
+    TERMINATED|SYSTEM_FAILURE)
+      log "Found existing service ${service_name} in state ${service_state}; reusing the name for a fresh proof deploy."
+      return 0
+      ;;
+  esac
+
+  log "Terminating existing service ${service_name} (${service_id}) in state ${service_state} before proof deploy"
+  if output="$(run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS}" \
+    "${cli_bin}" service terminate --service-id "${service_id}" 2>&1)"; then
+    printf '%s\n' "${output}" >> "${terminate_log}"
+  else
+    printf '%s\n' "${output}" >> "${terminate_log}"
+    if ! grep -Eiq 'already.*terminated|currently in state: TERMINATED|currently in state: TERMINATING' <<<"${output}"; then
+      die "Failed to terminate existing service ${service_name}. See ${terminate_log}."
+    fi
+  fi
+
+  wait_for_anyscale_service_terminated \
+    "${cli_bin}" \
+    "${service_name}" \
+    "${cloud_name}" \
+    "${WORKLOAD_COMMAND_TIMEOUT_SECONDS}" \
+    "${terminate_log}" \
+    "${status_log}"
+}
+
 service_url_host() {
   local service_url="$1"
   local host
@@ -5537,7 +5636,7 @@ run_anyscale_service_proof() {
   local import_path="$3"
   local success_marker="$4"
   local model_json="$5"
-  local cli_bin services_dir deploy_log wait_log status_log service_url_file
+  local cli_bin services_dir cleanup_log deploy_log wait_log status_log service_url_file
   local health_log positive_log negative_log stderr_log tunnel_log service_url
   local service_auth_token
   local positive_payload negative_payload positive_expected negative_expected deploy_exit
@@ -5549,6 +5648,7 @@ run_anyscale_service_proof() {
 
   cli_bin="$(anyscale_cli_bin)"
   services_dir="${SETUP_RUN_DIR}/services"
+  cleanup_log="${services_dir}/${service_name}.cleanup.log"
   deploy_log="${services_dir}/${service_name}.deploy.log"
   wait_log="${services_dir}/${service_name}.wait.log"
   status_log="${services_dir}/${service_name}.status.json"
@@ -5560,6 +5660,13 @@ run_anyscale_service_proof() {
   tunnel_log="${services_dir}/${service_name}.tunnel.log"
 
   mkdir -p "${services_dir}"
+
+  terminate_anyscale_service_if_present \
+    "${cli_bin}" \
+    "${service_name}" \
+    "${ANYSCALE_CLOUD_NAME}" \
+    "${status_log}" \
+    "${cleanup_log}"
 
   positive_payload="$(printf '%s' "${model_json}" | jq -c '.probes.positive | {x1, x2}')"
   negative_payload="$(printf '%s' "${model_json}" | jq -c '.probes.negative | {x1, x2}')"
@@ -5703,6 +5810,7 @@ workload_train_stage() {
     "anyscale_train_gpu_job_proof.py" \
     "GPU_TRAIN_JOB_PROOF_OK" \
     'ANYSCALE_PROOF_USE_GPU=1' \
+    'RAY_TRAIN_V2_ENABLED=0' \
     "CPU_BUILD_MANIFEST_JSON=${WORKLOAD_BUILD_MANIFEST_JSON}"
 
   model_file="$(workload_train_model_file)"

@@ -141,7 +141,7 @@ resource "helm_release" "nvidia_device_plugin" {
   wait             = true
   atomic           = true
   cleanup_on_fail  = true
-  timeout          = 600
+  timeout          = 1200
 
   values = [yamlencode(local.nvidia_device_plugin_values)]
 
@@ -168,7 +168,7 @@ resource "helm_release" "ingress_nginx" {
   wait             = true
   atomic           = true
   cleanup_on_fail  = true
-  timeout          = 600
+  timeout          = 1200
 
   values = [yamlencode(local.ingress_nginx_values)]
 
