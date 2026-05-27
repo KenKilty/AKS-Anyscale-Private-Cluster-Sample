@@ -33,6 +33,7 @@ variables {
     "console.azure.anyscale.com",
     "api.azure.anyscale.com",
     "*.az1.westus2.admin.azure.anyscale.com",
+    "*.azure.anyscale-cloud.dev",
     "anyscaleazwestus2prod.blob.core.windows.net",
     "anyscaleazwestus2prod.dfs.core.windows.net",
     "api.anyscale.com",
