@@ -65,6 +65,15 @@ install_azure_cli() {
   curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
 }
 
+ensure_azure_cli_identity_login() {
+  if az account show --only-show-errors >/dev/null 2>&1; then
+    log "Azure CLI already authenticated."
+    return 0
+  fi
+  log "Logging Azure CLI in with the jump host managed identity..."
+  az login --identity --only-show-errors >/dev/null
+}
+
 install_kubectl() {
   if have kubectl; then
     log "kubectl present."
@@ -139,6 +148,44 @@ install_notation() {
   install_notation_azure_kv_plugin
 }
 
+# Pinned ORAS CLI for OCI referrer attach/discover (SBOM workflow). Checksum is
+# the official release sha256 for the linux/amd64 artifact.
+ORAS_VERSION="1.3.2"
+ORAS_LINUX_AMD64_SHA256="9229ccc6d17bb282039ad4a69abb16dcb887a5bce567c075d731d9b3c7ad8eaf"
+
+install_oras() {
+  if have oras; then
+    log "oras present: $(oras version 2>/dev/null | awk '/Version/{print $2; exit}' || echo unknown)"
+    return 0
+  fi
+  log "Installing oras v${ORAS_VERSION} (linux amd64)..."
+  local tmp
+  tmp="$(mktemp -d)"
+  curl -sSfL "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_amd64.tar.gz" -o "${tmp}/oras.tar.gz"
+  printf '%s  %s\n' "${ORAS_LINUX_AMD64_SHA256}" "${tmp}/oras.tar.gz" | sha256sum -c -
+  sudo tar -xzf "${tmp}/oras.tar.gz" -C /usr/local/bin oras
+  rm -rf "${tmp}"
+}
+
+# Pinned Syft CLI for SPDX SBOM generation. Checksum is the official release
+# sha256 for the linux/amd64 artifact.
+SYFT_VERSION="1.45.1"
+SYFT_LINUX_AMD64_SHA256="20c84195e24927f50a3b2269946be51f4c4abc9d2f145fee7388b4199149f716"
+
+install_syft() {
+  if have syft; then
+    log "syft present: $(syft version 2>/dev/null | awk '/Version/{print $2; exit}' || echo unknown)"
+    return 0
+  fi
+  log "Installing syft v${SYFT_VERSION} (linux amd64)..."
+  local tmp
+  tmp="$(mktemp -d)"
+  curl -sSfL "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_amd64.tar.gz" -o "${tmp}/syft.tar.gz"
+  printf '%s  %s\n' "${SYFT_LINUX_AMD64_SHA256}" "${tmp}/syft.tar.gz" | sha256sum -c -
+  sudo tar -xzf "${tmp}/syft.tar.gz" -C /usr/local/bin syft
+  rm -rf "${tmp}"
+}
+
 ensure_repo() {
   if [[ -d "${REPO_PATH}/.git" || -f "${REPO_PATH}/scripts/anyscale-aks.sh" ]]; then
     log "Repo already present at ${REPO_PATH}."
@@ -173,12 +220,15 @@ main() {
   require_linux
   install_base_packages
   install_azure_cli
+  ensure_azure_cli_identity_login
   install_kubectl
   install_kubelogin
   install_helm
   install_uv
   install_podman
   install_notation
+  install_oras
+  install_syft
   ensure_repo
   ensure_venv
   log "Bootstrap complete. Validate with: ./scripts/anyscale-aks.sh module 2 verify"

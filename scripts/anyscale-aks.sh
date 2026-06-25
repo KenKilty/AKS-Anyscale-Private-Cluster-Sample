@@ -46,7 +46,7 @@ Compatibility commands:
       Run deterministic workload proofs. This is the public alias for the
       existing workload proof runner.
 
-  custom-image {preflight|prepare|apply|proof|prove-failure}
+  custom-image {preflight|prepare|sign|verify|sbom|sbom-proof|apply|proof|prove-failure}
       Build/push the local custom image with Podman, update workspaces, and
       prove the packaged dependency scenario.
 
@@ -119,6 +119,8 @@ dependency_hint() {
     anyscale) printf 'Install the Anyscale CLI in the repo venv: `uv venv .venv && UV_CACHE_DIR="$PWD/.cache/uv-cache" uv pip install --python .venv/bin/python anyscale`.\n' ;;
     drawio) printf 'Install diagrams.net/draw.io desktop app or CLI: https://www.diagrams.net/. Required only for diagram export.\n' ;;
     podman) printf 'Install Podman yourself before custom-image prepare. On macOS: `brew install podman`, then create/start a Podman machine manually.\n' ;;
+    syft) printf 'Install Syft on the jump host (handled by scripts/bootstrap-jump-host.sh): https://github.com/anchore/syft. Required only for custom-image sbom.\n' ;;
+    oras) printf 'Install ORAS on the jump host (handled by scripts/bootstrap-jump-host.sh): https://oras.land/. Required only for custom-image sbom/sbom-proof.\n' ;;
     *) printf 'Install `%s` and make sure it is on PATH.\n' "$1" ;;
   esac
 }
@@ -193,6 +195,8 @@ check_dependencies_for() {
   local context="$1"
   shift
 
+  source_env_if_present
+
   case "${context}" in
     deploy|verify|teardown|idempotency)
       check_commands "${context}" git az terraform kubectl kubelogin helm jq rsync python3 uv anyscale curl lsof
@@ -205,18 +209,30 @@ check_dependencies_for() {
       fi
       ;;
     custom-image)
+      local custom_image_base_commands
+      if [[ "${ANYSCALE_EXECUTION_MODE:-workstation}" == "jump-host" ]]; then
+        custom_image_base_commands="az jq"
+      else
+        custom_image_base_commands="az terraform jq"
+      fi
       case "${1:-}" in
         preflight|prepare|proof)
-          check_commands "${context} ${1:-}" az terraform kubectl kubelogin helm jq rsync python3 uv anyscale curl lsof podman
+          check_commands "${context} ${1:-}" ${custom_image_base_commands} kubectl kubelogin helm rsync python3 uv anyscale curl lsof podman
           ;;
         sign|verify)
-          check_commands "${context} ${1:-}" az terraform jq podman notation
+          check_commands "${context} ${1:-}" ${custom_image_base_commands} podman notation
+          ;;
+        sbom)
+          check_commands "${context} ${1:-}" ${custom_image_base_commands} syft oras
+          ;;
+        sbom-proof)
+          check_commands "${context} ${1:-}" ${custom_image_base_commands} oras python3
           ;;
         apply|prove-failure)
-          check_commands "${context} ${1:-}" az terraform kubectl kubelogin helm jq rsync python3 uv anyscale curl lsof
+          check_commands "${context} ${1:-}" ${custom_image_base_commands} kubectl kubelogin helm rsync python3 uv anyscale curl lsof
           ;;
         *)
-          check_commands "${context}" az terraform jq podman
+          check_commands "${context}" ${custom_image_base_commands} podman
           ;;
       esac
       ;;
@@ -545,6 +561,16 @@ doctor() {
     missing=1
   fi
 
+  if command -v az >/dev/null 2>&1; then
+    if az extension show --name ssh --only-show-errors >/dev/null 2>&1; then
+      printf 'ok: Azure CLI ssh extension (Bastion SSH)\n'
+    else
+      printf 'not-ready: Azure CLI ssh extension (Bastion SSH)\n'
+      printf '  Run: az extension add -n ssh\n'
+      missing=1
+    fi
+  fi
+
   printf '\nScenario readiness:\n'
   source_env_if_present
   local execution_mode="${ANYSCALE_EXECUTION_MODE:-workstation}"
@@ -834,6 +860,8 @@ custom_image_e2e_stage() {
 
       Resume with:
         ./scripts/anyscale-aks.sh custom-image prepare
+        ANYSCALE_CUSTOM_IMAGE_ENABLED=true ./scripts/anyscale-aks.sh custom-image sbom
+        ANYSCALE_CUSTOM_IMAGE_ENABLED=true ./scripts/anyscale-aks.sh custom-image sbom-proof
         ANYSCALE_CUSTOM_IMAGE_ENABLED=true ./scripts/anyscale-aks.sh custom-image apply
         ANYSCALE_CUSTOM_IMAGE_ENABLED=true ./scripts/anyscale-aks.sh custom-image proof
         ./scripts/anyscale-aks.sh proof all
@@ -841,6 +869,12 @@ EOF
     return 1
   fi
   run_setup custom-image prepare
+  if command -v syft >/dev/null 2>&1 && command -v oras >/dev/null 2>&1; then
+    ANYSCALE_CUSTOM_IMAGE_ENABLED=true run_setup custom-image sbom
+    ANYSCALE_CUSTOM_IMAGE_ENABLED=true run_setup custom-image sbom-proof
+  else
+    warn "syft or oras not installed; skipping SBOM steps. Re-run scripts/bootstrap-jump-host.sh on the jump host."
+  fi
   ANYSCALE_CUSTOM_IMAGE_ENABLED=true run_setup custom-image apply
   ANYSCALE_CUSTOM_IMAGE_ENABLED=true run_setup custom-image proof
 }
@@ -878,7 +912,7 @@ USAGE
 custom_image() {
   local action="${1:-}"
   case "${action}" in
-    preflight|prepare|sign|verify|apply|proof|prove-failure)
+    preflight|prepare|sign|verify|sbom|sbom-proof|apply|proof|prove-failure)
       shift
       run_setup custom-image "${action}" "$@"
       ;;
@@ -889,6 +923,8 @@ Usage:
   ./scripts/anyscale-aks.sh custom-image prepare
   ./scripts/anyscale-aks.sh custom-image sign
   ./scripts/anyscale-aks.sh custom-image verify
+  ./scripts/anyscale-aks.sh custom-image sbom
+  ./scripts/anyscale-aks.sh custom-image sbom-proof
   ./scripts/anyscale-aks.sh custom-image prove-failure
   ./scripts/anyscale-aks.sh custom-image apply
   ./scripts/anyscale-aks.sh custom-image proof
@@ -897,13 +933,15 @@ preflight     Check local Podman, private DNS, ACR push role, and ACR auth.
 prepare       Build and push the custom image with Podman.
 sign          Sign the pushed image with Notation + the Key Vault certificate.
 verify        Verify the image signature locally with Notation.
+sbom          Generate a Syft SPDX SBOM and attach (and sign) it as an OCI referrer.
+sbom-proof    Verify the SBOM referrer exists and contains the packaged dependency.
 prove-failure Prove the standard image cannot runtime-install the dependency.
 apply         Update durable workspaces to use the custom image.
 proof         Prove the packaged dependency is available on the custom image.
 USAGE
       ;;
     *)
-      die "Usage: ./scripts/anyscale-aks.sh custom-image {preflight|prepare|sign|verify|apply|proof|prove-failure}"
+      die "Usage: ./scripts/anyscale-aks.sh custom-image {preflight|prepare|sign|verify|sbom|sbom-proof|apply|proof|prove-failure}"
       ;;
   esac
 }

@@ -110,21 +110,23 @@ module_2_sync() {
   [[ -f "${ssh_key}" ]] || die "SSH private key not found at ${ssh_key}. Set SSH_PRIVATE_KEY_PATH."
 
   log "Opening Bastion tunnel to the Linux jump host..."
-  local tunnel pid port
+  local tunnel pid port known_hosts_file
   tunnel="$(open_bastion_tunnel)"
   pid="${tunnel%% *}"
   port="${tunnel##* }"
-  trap 'kill "${pid}" 2>/dev/null || true' EXIT
+  known_hosts_file="$(mktemp "${TMPDIR:-/tmp}/anyscale-module2-known-hosts.XXXXXX")"
+  trap 'rm -f "${known_hosts_file}"; kill "${pid}" 2>/dev/null || true' EXIT
 
   log "Syncing repo to ${admin_user}@127.0.0.1:${CANONICAL_REPO_PATH} (port ${port})..."
   # Ensure destination exists and is writable by the admin user.
   ssh -p "${port}" -i "${ssh_key}" \
     -o StrictHostKeyChecking=accept-new \
+    -o UserKnownHostsFile="${known_hosts_file}" \
     "${admin_user}@127.0.0.1" \
     "sudo mkdir -p '${CANONICAL_REPO_PATH}' && sudo chown -R ${admin_user} '${CANONICAL_REPO_PATH}'"
 
   rsync -az --delete \
-    -e "ssh -p ${port} -i ${ssh_key} -o StrictHostKeyChecking=accept-new" \
+    -e "ssh -p ${port} -i ${ssh_key} -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=${known_hosts_file}" \
     --exclude '.git/' \
     --exclude '.terraform/' \
     --exclude '.cache/' \
@@ -136,11 +138,12 @@ module_2_sync() {
   if [[ -f "${ROOT_DIR}/.env" ]]; then
     log "Copying .env and forcing jump-host execution mode on the VM..."
     rsync -az \
-      -e "ssh -p ${port} -i ${ssh_key} -o StrictHostKeyChecking=accept-new" \
+      -e "ssh -p ${port} -i ${ssh_key} -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=${known_hosts_file}" \
       "${ROOT_DIR}/.env" \
       "${admin_user}@127.0.0.1:${CANONICAL_REPO_PATH}/.env"
     ssh -p "${port}" -i "${ssh_key}" \
       -o StrictHostKeyChecking=accept-new \
+      -o UserKnownHostsFile="${known_hosts_file}" \
       "${admin_user}@127.0.0.1" \
       "grep -q '^ANYSCALE_EXECUTION_MODE=' '${CANONICAL_REPO_PATH}/.env' \
         && sed -i 's/^ANYSCALE_EXECUTION_MODE=.*/ANYSCALE_EXECUTION_MODE=jump-host/' '${CANONICAL_REPO_PATH}/.env' \
@@ -150,6 +153,7 @@ module_2_sync() {
   fi
 
   kill "${pid}" 2>/dev/null || true
+  rm -f "${known_hosts_file}"
   trap - EXIT
   log "Sync complete. Connect with: ./scripts/anyscale-aks.sh module 1 connect"
 }
@@ -168,7 +172,7 @@ module_2_doctor() {
 module_2_verify() {
   load_env
   if ! on_jump_host; then
-    warn "module 2 verify is intended to run on the Linux jump host (ANYSCALE_EXECUTION_MODE=jump-host)."
+    die "module 2 verify must run from the synced repo on the Linux jump host. From the workstation run 'module 2 sync' and 'module 1 connect', then on the VM run: cd ${CANONICAL_REPO_PATH} && ./scripts/anyscale-aks.sh module 2 verify"
   fi
 
   local failures=0

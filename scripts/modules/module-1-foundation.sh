@@ -69,6 +69,13 @@ terraform_admin() {
   terraform -chdir="${ADMIN_DIR}" "$@"
 }
 
+require_az_ssh_extension() {
+  command -v az >/dev/null 2>&1 || die "Azure CLI (az) is required to open the Bastion SSH session."
+  if ! az extension show --name ssh --only-show-errors >/dev/null 2>&1; then
+    die "Azure CLI extension 'ssh' is required for Bastion SSH. Install it with: az extension add -n ssh"
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # VM size selection (runs before terraform plan/apply).
 # ---------------------------------------------------------------------------
@@ -290,7 +297,8 @@ module_1_connect() {
   printf '  az network bastion ssh --name %q --resource-group %q --target-resource-id %q --auth-type ssh-key --username %q --ssh-key %q\n' \
     "${bastion_name}" "${rg}" "${vm_id}" "${admin_user}" "${SSH_PRIVATE_KEY_PATH:-${HOME}/.ssh/id_ed25519}"
 
-  command -v az >/dev/null 2>&1 || die "Azure CLI (az) is required to open the Bastion tunnel."
+  require_az_ssh_extension
+  log "After the Ubuntu welcome banner, confirm the prompt is on ${vm_name}, then run: cd ${ANYSCALE_AKS_REPO_PATH:-/opt/anyscale-aks-sample}"
   az network bastion ssh \
     --name "${bastion_name}" \
     --resource-group "${rg}" \

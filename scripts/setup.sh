@@ -3219,8 +3219,10 @@ invoke_jump_host_bootstrap() {
   fi
 
   # ---- Open Bastion tunnel to jump host port 22 ----------------------------
-  local jh_port jh_pid
+  local jh_port jh_pid known_hosts_file outer_exit_trap
   jh_port="${BOOTSTRAP_BASTION_SSH_PORT:-50023}"
+  known_hosts_file="$(mktemp "${TMPDIR:-/tmp}/anyscale-bastion-known-hosts.XXXXXX")"
+  outer_exit_trap="$(trap -p EXIT || true)"
   log "Opening Bastion tunnel to jump host on local port ${jh_port} ..."
   az network bastion tunnel \
     --name "${bastion_name_val}" \
@@ -3229,7 +3231,7 @@ invoke_jump_host_bootstrap() {
     --resource-port 22 \
     --port "${jh_port}" >/dev/null 2>&1 &
   jh_pid=$!
-  trap 'kill "${jh_pid}" 2>/dev/null || true' EXIT
+  trap 'rm -f "${known_hosts_file}"; kill "${jh_pid}" 2>/dev/null || true; [[ "${outer_exit_trap}" == *deploy_e2e_cleanup* ]] && deploy_e2e_cleanup' EXIT
 
   local waited=0
   while ! { command -v lsof >/dev/null 2>&1 && lsof -i :"${jh_port}" >/dev/null 2>&1; }; do
@@ -3242,7 +3244,7 @@ invoke_jump_host_bootstrap() {
   done
   log "Bastion tunnel ready on 127.0.0.1:${jh_port} (pid ${jh_pid})."
 
-  local ssh_base_opts="-p ${jh_port} -i ${ssh_key} -o StrictHostKeyChecking=accept-new"
+  local ssh_base_opts="-p ${jh_port} -i ${ssh_key} -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=${known_hosts_file}"
   local ssh_target="${admin_user}@127.0.0.1"
 
   # Ensure canonical path exists and is owned by the admin user.
@@ -3252,8 +3254,12 @@ invoke_jump_host_bootstrap() {
      && sudo mkdir -p '${canonical_repo_path}/infra/terraform/modules/cluster_bootstrap/charts' \
      && sudo chown -R ${admin_user} '${canonical_repo_path}'"
 
-  # ---- Rsync bootstrap script, log lib, and local chart --------------------
-  log "Syncing bootstrap-k8s.sh, lib/log.sh, and chart to jump host ..."
+  # ---- Rsync bootstrap scripts, log lib, and local chart -------------------
+  log "Syncing bootstrap scripts, lib/log.sh, and chart to jump host ..."
+  rsync -az \
+    -e "ssh ${ssh_base_opts}" \
+    "${ROOT_DIR}/scripts/bootstrap-jump-host.sh" \
+    "${ssh_target}:${canonical_repo_path}/scripts/bootstrap-jump-host.sh"
   rsync -az \
     -e "ssh ${ssh_base_opts}" \
     "${ROOT_DIR}/scripts/bootstrap-k8s.sh" \
@@ -3266,6 +3272,19 @@ invoke_jump_host_bootstrap() {
     -e "ssh ${ssh_base_opts}" \
     "${ROOT_DIR}/infra/terraform/modules/cluster_bootstrap/charts/anyscale-gateway/" \
     "${ssh_target}:${canonical_repo_path}/infra/terraform/modules/cluster_bootstrap/charts/anyscale-gateway/"
+
+  log "Ensuring jump host operator tooling is present..."
+  # shellcheck disable=SC2029
+  ssh ${ssh_base_opts} "${ssh_target}" \
+    "cd '${canonical_repo_path}' \
+     && if ! command -v az >/dev/null 2>&1 \
+        || ! command -v kubectl >/dev/null 2>&1 \
+        || ! command -v kubelogin >/dev/null 2>&1 \
+        || ! command -v helm >/dev/null 2>&1; then \
+          bash scripts/bootstrap-jump-host.sh; \
+        elif ! az account show --only-show-errors >/dev/null 2>&1; then \
+          az login --identity --only-show-errors >/dev/null; \
+        fi"
 
   # ---- Invoke bootstrap-k8s.sh on the jump host via piped bash script ------
   log "Running bootstrap-k8s.sh ${phase} on jump host ..."
@@ -3295,7 +3314,12 @@ invoke_jump_host_bootstrap() {
   } | ssh ${ssh_base_opts} "${ssh_target}" bash
 
   kill "${jh_pid}" 2>/dev/null || true
-  trap - EXIT
+  rm -f "${known_hosts_file}"
+  if [[ -n "${outer_exit_trap}" ]]; then
+    eval "${outer_exit_trap}"
+  else
+    trap - EXIT
+  fi
   log "Jump host bootstrap ${phase} complete."
 }
 
@@ -4572,12 +4596,13 @@ PY
 # instead of a raw Azure 403 mid-upload.
 require_submitter_storage_for_local_submit() {
   local what="$1"
+  local jump_host_repo_path="${ANYSCALE_AKS_REPO_PATH:-/opt/anyscale-aks-sample}"
   [[ -n "${ANYSCALE_CLI_TOKEN:-}" ]] && return 0
   # In jump-host mode the submit runs in-VNet with private DNS; do not gate on a
   # Terraform-dependent storage DNS preflight (the jump host has no local state).
   [[ "${ANYSCALE_EXECUTION_MODE:-workstation}" == "jump-host" ]] && return 0
   submitter_storage_private_dns_ready && return 0
-  die "Cannot submit ${what} from this workstation: it does not resolve the private Storage Blob/DFS endpoints, so the working-directory upload to the private storage account fails with HTTP 403. Recommended manual path: connect to the in-VNet Linux jump host through Azure Bastion, run 'ANYSCALE_HOST=$(default_anyscale_host) ${ROOT_DIR}/.venv/bin/anyscale login', then re-run this proof in jump-host mode (ANYSCALE_EXECUTION_MODE=jump-host). Non-interactive/CI fallback only: set ANYSCALE_CLI_TOKEN in .env so the harness submits from inside the workspace pod."
+  die "Cannot submit ${what} from this workstation: it does not resolve the private Storage Blob/DFS endpoints, so the working-directory upload to the private storage account fails with HTTP 403. Recommended manual path: connect to the in-VNet Linux jump host through Azure Bastion, run 'cd ${jump_host_repo_path} && ANYSCALE_HOST=$(default_anyscale_host) .venv/bin/anyscale login --no-browser', then re-run this proof from that same jump-host repo. Non-interactive/CI fallback only: set ANYSCALE_CLI_TOKEN in .env so the harness submits from inside the workspace pod."
 }
 
 # Upfront gate for the job/service proof pipeline. The build/train/serve stages
@@ -4587,12 +4612,15 @@ require_submitter_storage_for_local_submit() {
 # The recommended manual path is the in-VNet jump host after `anyscale login`;
 # ANYSCALE_CLI_TOKEN is the non-interactive/CI fallback only.
 workload_pipeline_preflight() {
+  local jump_host_repo_path="${ANYSCALE_AKS_REPO_PATH:-/opt/anyscale-aks-sample}"
+  load_env
+  sync_anyscale_cli_env
   require_anyscale_cli
   anyscale_cli_auth_available && return 0
   if [[ "${ANYSCALE_EXECUTION_MODE:-workstation}" == "jump-host" ]]; then
-    die "Anyscale CLI is not logged in on this jump host. The job/service proofs submit from here (in-VNet, private DNS), so log in first: ANYSCALE_HOST=$(default_anyscale_host) ${ROOT_DIR}/.venv/bin/anyscale login, then re-run this proof."
+    die "Anyscale CLI is not logged in on this jump host. The job/service proofs submit from here (in-VNet, private DNS), so log in first: cd ${jump_host_repo_path} && ANYSCALE_HOST=$(default_anyscale_host) .venv/bin/anyscale login --no-browser, then re-run this proof."
   fi
-  die "Anyscale CLI is not authenticated for the job/service proofs. Recommended manual path: connect to the in-VNet Linux jump host through Azure Bastion, run 'ANYSCALE_HOST=$(default_anyscale_host) ${ROOT_DIR}/.venv/bin/anyscale login', then run this proof in jump-host mode (ANYSCALE_EXECUTION_MODE=jump-host). Non-interactive/CI fallback only: set ANYSCALE_CLI_TOKEN in .env."
+  die "Anyscale CLI is not authenticated for the job/service proofs. Recommended manual path: connect to the in-VNet Linux jump host through Azure Bastion, run 'cd ${jump_host_repo_path} && ANYSCALE_HOST=$(default_anyscale_host) .venv/bin/anyscale login --no-browser', then run this proof from that same jump-host repo. Non-interactive/CI fallback only: set ANYSCALE_CLI_TOKEN in .env."
 }
 
 validate_gateway_tls_lifecycle() {
@@ -6510,6 +6538,167 @@ JSON
   printf 'CUSTOM_IMAGE_VERIFY_OK image_uri=%s digest=%s\n' "$(custom_image_uri)" "${digest}"
 }
 
+# ORAS login against the private ACR using a short-lived ACR token. The token is
+# only ever passed over stdin so it never appears in argv or logs.
+custom_image_oras_login() {
+  local acr_name="$1" acr_token="$2"
+  printf '%s' "${acr_token}" | oras login "${acr_name}.azurecr.io" \
+    --username 00000000-0000-0000-0000-000000000000 \
+    --password-stdin >/dev/null
+}
+
+# Discover the digest of the application/spdx+json SBOM referrer attached to the
+# image. Emits an empty string when no such referrer exists.
+custom_image_sbom_referrer_digest() {
+  local image_ref="$1"
+  local digest attempt
+
+  for attempt in {1..12}; do
+    digest="$(run_with_timeout "${SETUP_TIMEOUT_AZURE_COMMAND_SECONDS}" \
+      oras discover --artifact-type application/spdx+json --format json "${image_ref}" \
+      | jq -r '(.referrers // .manifests // []) | sort_by(.annotations["org.opencontainers.image.created"] // "") | reverse | .[0].digest // empty')" || return $?
+    if [[ -n "${digest}" ]]; then
+      printf '%s\n' "${digest}"
+      return 0
+    fi
+    sleep 5
+  done
+
+  printf ''
+}
+
+custom_image_sbom() {
+  custom_image_enabled || die "Set ANYSCALE_CUSTOM_IMAGE_ENABLED=true before generating the custom image SBOM."
+  load_env
+  require_cmd az
+  require_cmd jq
+  require_cmd syft
+  require_cmd oras
+
+  local acr_name repo tag digest image_ref acr_token sbom_file referrer_digest sbom_ref
+  local akv_name cert_name key_id sbom_signed
+  acr_name="$(custom_image_acr_name)"
+  repo="${ANYSCALE_CUSTOM_IMAGE_REPOSITORY}"
+  tag="${ANYSCALE_CUSTOM_IMAGE_TAG}"
+
+  require_custom_image_acr_private_dns "${acr_name}"
+
+  log "Resolving digest for ${acr_name}.azurecr.io/${repo}:${tag}..."
+  digest="$(custom_image_resolve_digest "${acr_name}" "${repo}" "${tag}")" \
+    || die "Could not resolve the digest for ${repo}:${tag} in ${acr_name}. Run custom-image prepare (build + push) first."
+  [[ -n "${digest}" ]] || die "Empty digest for ${repo}:${tag} in ${acr_name}."
+
+  image_ref="${acr_name}.azurecr.io/${repo}@${digest}"
+  acr_token="$(custom_image_acr_token "${acr_name}" 2>&1)" \
+    || die "Could not get an ACR access token for ${acr_name}. ACR output: ${acr_token}"
+
+  mkdir -p "${CACHE_DIR}/tmp"
+  sbom_file="$(mktemp "${CACHE_DIR}/tmp/custom-image-sbom.XXXXXX.spdx.json")"
+
+  log "Generating SPDX SBOM for ${image_ref} with syft..."
+  SYFT_REGISTRY_AUTH_AUTHORITY="${acr_name}.azurecr.io" \
+  SYFT_REGISTRY_AUTH_USERNAME=00000000-0000-0000-0000-000000000000 \
+  SYFT_REGISTRY_AUTH_PASSWORD="${acr_token}" \
+    run_with_timeout "${SETUP_TIMEOUT_AZURE_COMMAND_SECONDS}" \
+      syft scan "registry:${image_ref}" -o "spdx-json=${sbom_file}" \
+    || { rm -f "${sbom_file}"; die "syft failed to generate the SBOM for ${image_ref}."; }
+
+  log "Logging in to ${acr_name}.azurecr.io for ORAS..."
+  custom_image_oras_login "${acr_name}" "${acr_token}"
+
+  log "Attaching SBOM to ${image_ref} as an OCI referrer (application/spdx+json)..."
+  (
+    cd "$(dirname "${sbom_file}")"
+    run_with_timeout "${SETUP_TIMEOUT_AZURE_COMMAND_SECONDS}" \
+      oras attach --artifact-type application/spdx+json \
+        "${image_ref}" \
+        "$(basename "${sbom_file}"):application/spdx+json"
+  ) || { rm -f "${sbom_file}"; die "ORAS failed to attach the SBOM referrer to ${image_ref}."; }
+  rm -f "${sbom_file}"
+
+  referrer_digest="$(custom_image_sbom_referrer_digest "${image_ref}")" \
+    || die "Could not discover the SBOM referrer for ${image_ref} after attach."
+  [[ -n "${referrer_digest}" ]] || die "SBOM referrer not visible for ${image_ref} after attach."
+  sbom_ref="${acr_name}.azurecr.io/${repo}@${referrer_digest}"
+
+  sbom_signed=false
+  if command -v notation >/dev/null 2>&1 && notation plugin ls 2>/dev/null | grep -q 'azure-kv'; then
+    akv_name="$(signing_key_vault_name)"
+    cert_name="${ANYSCALE_SIGNING_CERT_NAME}"
+    ensure_signing_certificate "${akv_name}" "${cert_name}"
+    log "Resolving signing key id from Key Vault ${akv_name} (cert ${cert_name})..."
+    key_id="$(run_with_timeout "${SETUP_TIMEOUT_AZURE_COMMAND_SECONDS}" \
+      az keyvault certificate show --vault-name "${akv_name}" --name "${cert_name}" \
+        --query kid -o tsv --only-show-errors)" \
+      || die "Could not read certificate ${cert_name} from Key Vault ${akv_name}. Ensure this principal has Key Vault Certificates Officer + Crypto User."
+    [[ -n "${key_id}" ]] || die "Empty key id for cert ${cert_name} in ${akv_name}."
+    log "Signing SBOM referrer ${sbom_ref} with notation (cose, azure-kv, managedid)..."
+    NOTATION_USERNAME=00000000-0000-0000-0000-000000000000 NOTATION_PASSWORD="${acr_token}" \
+      run_with_timeout "${SETUP_TIMEOUT_AZURE_COMMAND_SECONDS}" \
+      notation sign \
+        --signature-format cose \
+        --id "${key_id}" \
+        --plugin azure-kv \
+        --plugin-config credential_type=managedid \
+        "${sbom_ref}"
+    sbom_signed=true
+  else
+    warn "notation azure-kv plugin not available; attaching the SBOM referrer without a signature."
+  fi
+
+  printf 'CUSTOM_IMAGE_SBOM_OK image_uri=%s digest=%s sbom_referrer=%s signed=%s\n' \
+    "$(custom_image_uri)" "${digest}" "${referrer_digest}" "${sbom_signed}"
+}
+
+custom_image_sbom_proof() {
+  load_env
+  require_cmd az
+  require_cmd jq
+  require_cmd oras
+  require_cmd python3
+  [[ -f "${ROOT_DIR}/workloads/proofs/custom_image_sbom_proof.py" ]] || die "Missing workloads/proofs/custom_image_sbom_proof.py"
+
+  local acr_name repo tag digest image_ref acr_token referrer_digest sbom_ref pull_dir requirement
+  acr_name="$(custom_image_acr_name)"
+  repo="${ANYSCALE_CUSTOM_IMAGE_REPOSITORY}"
+  tag="${ANYSCALE_CUSTOM_IMAGE_TAG}"
+  requirement="${ANYSCALE_CUSTOM_IMAGE_REQUIREMENT}"
+
+  require_custom_image_acr_private_dns "${acr_name}"
+
+  digest="$(custom_image_resolve_digest "${acr_name}" "${repo}" "${tag}")" \
+    || die "Could not resolve the digest for ${repo}:${tag} in ${acr_name}."
+  [[ -n "${digest}" ]] || die "Empty digest for ${repo}:${tag} in ${acr_name}."
+
+  image_ref="${acr_name}.azurecr.io/${repo}@${digest}"
+  acr_token="$(custom_image_acr_token "${acr_name}" 2>&1)" \
+    || die "Could not get an ACR access token for ${acr_name}. ACR output: ${acr_token}"
+
+  custom_image_oras_login "${acr_name}" "${acr_token}"
+
+  log "Discovering SBOM referrer (application/spdx+json) for ${image_ref}..."
+  referrer_digest="$(custom_image_sbom_referrer_digest "${image_ref}")" \
+    || die "Could not query referrers for ${image_ref}."
+  [[ -n "${referrer_digest}" ]] || die "No application/spdx+json SBOM referrer found for ${image_ref}. Run custom-image sbom first."
+
+  sbom_ref="${acr_name}.azurecr.io/${repo}@${referrer_digest}"
+  mkdir -p "${CACHE_DIR}/tmp"
+  pull_dir="$(mktemp -d "${CACHE_DIR}/tmp/custom-image-sbom-pull.XXXXXX")"
+  log "Pulling SBOM referrer ${sbom_ref}..."
+  run_with_timeout "${SETUP_TIMEOUT_AZURE_COMMAND_SECONDS}" \
+    oras pull "${sbom_ref}" --output "${pull_dir}" \
+    || { rm -rf "${pull_dir}"; die "ORAS failed to pull the SBOM referrer ${sbom_ref}."; }
+
+  log "Verifying packaged dependency ${requirement} in the SBOM referrer..."
+  ANYSCALE_CUSTOM_IMAGE_REQUIREMENT="${requirement}" \
+    python3 "${ROOT_DIR}/workloads/proofs/custom_image_sbom_proof.py" "${pull_dir}" \
+    || { rm -rf "${pull_dir}"; die "SBOM referrer for ${image_ref} did not contain ${requirement}."; }
+  rm -rf "${pull_dir}"
+
+  printf 'CUSTOM_IMAGE_SBOM_PROOF_OK image_uri=%s digest=%s sbom_referrer=%s requirement=%s\n' \
+    "$(custom_image_uri)" "${digest}" "${referrer_digest}" "${requirement}"
+}
+
 image_integrity_preflight() {
   local strict="${1:-}"
   load_env
@@ -8223,6 +8412,18 @@ custom_image() {
       run_stage "verify" custom_image_verify
       setup_run_summary
       ;;
+    sbom)
+      export ANYSCALE_CUSTOM_IMAGE_ENABLED=true
+      setup_run_init "custom-image-sbom" 1
+      run_stage "sbom" custom_image_sbom
+      setup_run_summary
+      ;;
+    sbom-proof)
+      export ANYSCALE_CUSTOM_IMAGE_ENABLED=true
+      setup_run_init "custom-image-sbom-proof" 1
+      run_stage "sbom-proof" custom_image_sbom_proof
+      setup_run_summary
+      ;;
     apply)
       export ANYSCALE_CUSTOM_IMAGE_ENABLED=true
       setup_run_init "custom-image-apply" 1
@@ -8244,13 +8445,15 @@ Usage:
   ./scripts/setup.sh custom-image prepare
   ./scripts/setup.sh custom-image sign
   ./scripts/setup.sh custom-image verify
+  ./scripts/setup.sh custom-image sbom
+  ./scripts/setup.sh custom-image sbom-proof
   ./scripts/setup.sh custom-image prove-failure
   ./scripts/setup.sh custom-image apply
   ./scripts/setup.sh custom-image proof
 USAGE
       ;;
     *)
-      die "Usage: ./scripts/setup.sh custom-image {preflight|prepare|sign|verify|apply|proof|prove-failure}"
+      die "Usage: ./scripts/setup.sh custom-image {preflight|prepare|sign|verify|sbom|sbom-proof|apply|proof|prove-failure}"
       ;;
   esac
 }

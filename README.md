@@ -194,7 +194,7 @@ Before starting, make sure you have Azure access, a local operator workstation, 
 - The central command, `./scripts/anyscale-aks.sh`, checks command-specific dependencies before deploy, proof, teardown, and full e2e runs. Missing tools fail early with install guidance.
 - Required core tools: Git, Azure CLI `2.86.0` or newer, Terraform `>= 1.9.0`, `kubectl`, `kubelogin`, Helm, `jq`, `rsync`, Python `3.9+`, `uv`, `curl`, and `lsof`.
 - The Anyscale CLI must be installed into the repo virtual environment at `.venv/bin/anyscale`.
-- The Azure CLI `aks-preview` and `bastion` extensions are installed automatically when needed.
+- The Azure CLI `aks-preview` and `bastion` extensions are installed automatically when needed. Install the `ssh` extension before using Module 1 Bastion SSH: `az extension add -n ssh`.
 - Azure permissions must allow networking, Firewall, Bastion, AKS, Private Link, storage, ACR, Log Analytics, managed identities, RBAC assignments, and the Anyscale marketplace resources.
 - GPU quota for `Standard_NC16as_T4_v3` in the target region.
 - Sign in to the Anyscale CLI with `ANYSCALE_HOST=https://console.azure.anyscale.com .venv/bin/anyscale login`, or set `ANYSCALE_CLI_TOKEN` for non-interactive automation.

@@ -32,6 +32,8 @@ Usage:
   ./scripts/anyscale-aks.sh module 4 prepare
   ./scripts/anyscale-aks.sh module 4 sign
   ./scripts/anyscale-aks.sh module 4 verify
+  ./scripts/anyscale-aks.sh module 4 sbom
+  ./scripts/anyscale-aks.sh module 4 sbom-proof
   ./scripts/anyscale-aks.sh module 4 apply
   ./scripts/anyscale-aks.sh module 4 proof
 USAGE
@@ -41,7 +43,7 @@ main() {
   local action="${1:-}"
   shift || true
   case "${action}" in
-    prove-failure|preflight|prepare|sign|verify|apply|proof)
+    prove-failure|preflight|prepare|sign|verify|sbom|sbom-proof|apply|proof)
       dispatch custom-image "${action}" "$@"
       ;;
     ""|--help|-h) usage ;;

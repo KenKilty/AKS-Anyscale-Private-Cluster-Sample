@@ -44,6 +44,8 @@ automation never needs a stored secret.
 
 - Azure CLI signed in (`az login`) with rights to create networking, VMs,
   storage, and role assignments in the target subscription.
+- Azure CLI `ssh` extension installed for Bastion SSH:
+  `az extension add -n ssh`.
 - A populated `.env` (copy `.env-template`) with at least `TF_VAR_project`,
   `TF_VAR_environment`, `TF_VAR_region_short`, `TF_VAR_azure_location`,
   `TF_VAR_azure_subscription_id`, and `TF_VAR_azure_tenant_id`.

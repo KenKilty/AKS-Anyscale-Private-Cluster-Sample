@@ -20,8 +20,10 @@ and your durable workspaces run with that image — confirmed by
 - A custom Ray image built with Podman on the Linux jump host and pushed to the
   private ACR (`cr<project><env><region>.azurecr.io`).
 - A Notation signature attached to the image in ACR as an OCI referrer.
+- A Syft SPDX SBOM attached to the image in ACR as a signed OCI referrer.
 - An updated `aks-cpu-workspace` and `aks-gpu-workspace` using the custom image.
 - A passing dependency proof: `CUSTOM_IMAGE_DEPENDENCY_PROOF_OK`.
+- A passing SBOM proof: `CUSTOM_IMAGE_SBOM_PROOF_OK`.
 
 ## Why This Matters
 
@@ -41,16 +43,18 @@ endpoint. Module 3 deploys that ACR; Module 4 uses it.
 
 ## Review what you're about to build
 
-The custom-image flow is six steps:
+The custom-image flow is seven steps:
 
 1. `prove-failure` — submit a job on the standard image and confirm the runtime
    install is blocked (the intentional, expected failure).
 2. `preflight` — confirm Podman, private ACR DNS, and `AcrPush` are in place.
 3. `prepare` — build and push the image with Podman.
 4. `sign` + `verify` — attach a Notation signature and verify it from the jump host.
-5. `apply` — point the
+5. `sbom` + `sbom-proof` — generate a Syft SPDX SBOM, attach it as a signed OCI
+   referrer, and prove the packaged dependency is recorded in it.
+6. `apply` — point the
    durable workspaces at the new image URI.
-6. `proof` — load the packaged dependency inside the workspace and confirm it
+7. `proof` — load the packaged dependency inside the workspace and confirm it
    imports.
 
 The representative dependency is `onnxruntime==1.22.0`, defined in
@@ -132,7 +136,32 @@ Certificates Officer`, `Key Vault Crypto User`, and `Key Vault Secrets User`) ar
 created by Terraform. The certificate itself is bootstrapped from the jump host
 because the workstation cannot reach the private-only Key Vault data plane.
 
-## Exercise 4: Prove the custom image
+## Exercise 4: Attach and prove the SBOM
+
+A Software Bill of Materials (SBOM) records every package baked into the image so
+auditors can confirm what shipped without pulling the image. This step runs on
+the jump host, which reaches the private ACR endpoint. It uses Syft to generate
+the SBOM and ORAS to attach it as an OCI referrer.
+
+```bash
+./scripts/anyscale-aks.sh module 4 sbom
+./scripts/anyscale-aks.sh module 4 sbom-proof
+```
+
+- `sbom` resolves the pushed image digest, generates a Syft SPDX JSON SBOM for
+  that digest, attaches it to the image in ACR as an OCI referrer with artifact
+  type `application/spdx+json`, and — when the `notation-azure-kv` plugin is
+  available — signs the SBOM referrer with the same Key Vault certificate used in
+  Exercise 3. It prints `CUSTOM_IMAGE_SBOM_OK`.
+- `sbom-proof` discovers the SBOM referrer, pulls it from ACR with ORAS, and
+  confirms the SPDX document records `onnxruntime==1.22.0`. It prints
+  `CUSTOM_IMAGE_SBOM_PROOF_OK`.
+
+ORAS authenticates to the private ACR with a short-lived `az acr login` token
+passed over stdin, so no registry credential is ever printed. Syft and ORAS are
+installed on the jump host by `scripts/bootstrap-jump-host.sh`.
+
+## Exercise 5: Prove the custom image
 
 ```bash
 ./scripts/anyscale-aks.sh module 4 proof
@@ -150,11 +179,12 @@ CUSTOM_IMAGE_DEPENDENCY_PROOF_OK
 - `prove-failure` prints `CUSTOM_IMAGE_STANDARD_IMAGE_EXPECTED_FAILURE_OK`.
 - `preflight` prints `CUSTOM_IMAGE_PREFLIGHT_OK`.
 - `prepare` prints `CUSTOM_IMAGE_BUILD_OK`.
+- `sbom` prints `CUSTOM_IMAGE_SBOM_OK` and `sbom-proof` prints `CUSTOM_IMAGE_SBOM_PROOF_OK`.
 - `proof` prints `CUSTOM_IMAGE_DEPENDENCY_PROOF_OK`.
 
 ## Unattended Equivalence
 
-All four exercises map to the `--custom-image` stage of the e2e command run from
+All of these exercises map to the `--custom-image` stage of the e2e command run from
 Module 3:
 
 ```bash
@@ -162,10 +192,12 @@ Module 3:
 ```
 
 The `--custom-image` flag runs `prove-failure`, `preflight`, `prepare`, `apply`,
-and `proof` in order. Signing is a separate Module 4 exercise because it depends
-on the Key Vault and Image Integrity resources introduced for Module 5. The same
-custom-image steps are also available under the backward-compat alias
-`module 3 custom-image <action>`.
+and `proof` in order. When Syft and ORAS are installed, the custom-image stage
+also runs `sbom` and `sbom-proof` after `prepare`. SBOM attachment does not
+require Key Vault; SBOM signing is skipped unless the Notation Azure Key Vault
+plugin is available. Image signing and signature admission checks remain separate
+Module 4 and Module 5 exercises. The same custom-image steps are also available
+under the backward-compat alias `module 3 custom-image <action>`.
 
 ## Troubleshooting
 
