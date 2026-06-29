@@ -276,11 +276,40 @@ run_setup() {
 }
 
 source_env_if_present() {
+  local preserve_anyscale_cli_token="${ANYSCALE_CLI_TOKEN:-}"
+  local preserve_tf_var_anyscale_cli_token="${TF_VAR_anyscale_cli_token:-}"
+  local preserve_anyscale_host="${ANYSCALE_HOST:-}"
+  local preserve_anyscale_cloud_name="${ANYSCALE_CLOUD_NAME:-}"
+  local preserve_anyscale_cloud_deployment_id="${ANYSCALE_CLOUD_DEPLOYMENT_ID:-}"
+
   if [[ -f "${ROOT_DIR}/.env" ]]; then
+    set +u
     set -a
     # shellcheck source=/dev/null
     source "${ROOT_DIR}/.env"
     set +a
+    set -u
+  fi
+
+  if [[ -n "${preserve_anyscale_cli_token}" ]]; then
+    ANYSCALE_CLI_TOKEN="${preserve_anyscale_cli_token}"
+    export ANYSCALE_CLI_TOKEN
+  fi
+  if [[ -n "${preserve_tf_var_anyscale_cli_token}" ]]; then
+    TF_VAR_anyscale_cli_token="${preserve_tf_var_anyscale_cli_token}"
+    export TF_VAR_anyscale_cli_token
+  fi
+  if [[ -n "${preserve_anyscale_host}" ]]; then
+    ANYSCALE_HOST="${preserve_anyscale_host}"
+    export ANYSCALE_HOST
+  fi
+  if [[ -n "${preserve_anyscale_cloud_name}" ]]; then
+    ANYSCALE_CLOUD_NAME="${preserve_anyscale_cloud_name}"
+    export ANYSCALE_CLOUD_NAME
+  fi
+  if [[ -n "${preserve_anyscale_cloud_deployment_id}" ]]; then
+    ANYSCALE_CLOUD_DEPLOYMENT_ID="${preserve_anyscale_cloud_deployment_id}"
+    export ANYSCALE_CLOUD_DEPLOYMENT_ID
   fi
 }
 

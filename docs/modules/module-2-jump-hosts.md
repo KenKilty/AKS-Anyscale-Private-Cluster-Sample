@@ -30,6 +30,20 @@ The Linux jump host must be boring and repeatable. If every operator installs
 tools a little differently, the sample becomes hard to teach and harder to
 debug. Module 2 makes the host deterministic.
 
+That repeatability matters for security as well. The jump host is the only place
+that reaches the private AKS control plane from inside the VNet, so it stays
+minimal, identity-based, and separated from the workload namespaces. The cluster
+bootstrap that follows applies the current hardening baseline for workload
+runtime: Pod Security Admission baseline labels, a default-deny ingress
+NetworkPolicy, and namespace resource guardrails. That keeps the operator path
+and the workload path aligned with the same enterprise posture.
+
+The same boundary applies to private data-plane artifacts. Your workstation can
+run Azure control-plane deploy and verify steps through Bastion-assisted helper
+commands, but private ACR pushes, private Storage uploads for Anyscale working
+directories, Key Vault signing operations, and the full Anyscale job/service
+proofs belong on the Linux jump host where private DNS resolves inside the VNet.
+
 The optional Windows browser host is equally constrained: it is a **browser
 desktop only**. It never owns Terraform state, never runs Podman, and never runs
 Anyscale CLI automation.

@@ -151,8 +151,28 @@ run "private_aks_and_egress_contract" {
   }
 
   assert {
-    condition     = output.private_mode_validation.aks.azure_rbac_enabled == true && output.private_mode_validation.aks.local_account_disabled == false
-    error_message = "AKS must use managed Entra/Azure RBAC for kubelogin while keeping local accounts available for Bastion break-glass validation."
+    condition     = output.private_mode_validation.aks.azure_rbac_enabled == true && output.private_mode_validation.aks.local_account_disabled == true
+    error_message = "AKS must use managed Entra/Azure RBAC and disable local accounts by default."
+  }
+
+  assert {
+    condition     = output.private_mode_validation.aks.defender_enabled == true
+    error_message = "AKS Microsoft Defender for Containers must be enabled."
+  }
+
+  assert {
+    condition     = output.private_mode_validation.aks.key_vault_secrets_provider_enabled == true
+    error_message = "AKS Key Vault Secrets Provider must be enabled."
+  }
+
+  assert {
+    condition     = output.private_mode_validation.aks.automatic_upgrade_channel == "patch"
+    error_message = "AKS automatic upgrade channel must default to patch for security patch hygiene."
+  }
+
+  assert {
+    condition     = output.private_mode_validation.aks.node_os_upgrade_channel == "SecurityPatch"
+    error_message = "AKS node OS upgrade channel must default to SecurityPatch."
   }
 
   assert {

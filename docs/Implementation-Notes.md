@@ -5,17 +5,23 @@ This file keeps the implementation facts behind the main [README](../README.md).
 ## Validated Reference State
 
 - The Azure side of the deployment creates the private network, private AKS cluster, Bastion path, storage, registry, routing, identity, observability resources, and Azure-native Anyscale platform resources from Terraform.
-- The deployment runs in two phases: foundation first, then a Bastion-backed rerun that gives Terraform live Kubernetes access for the bootstrap layer and Anyscale platform resources.
+- The deployment runs in two phases: foundation first, then a Bastion-backed pass that gives Terraform live Kubernetes access for the bootstrap layer and Anyscale platform resources.
+- The AKS cluster defaults to an enterprise posture: local cluster admin accounts are disabled, Microsoft Defender for Containers is enabled, and the Key Vault Secrets Provider add-on is enabled. Operators should use Entra-backed admin access and only opt out for a documented break-glass requirement.
 - The Terraform-managed bootstrap layer prepares namespaces, service-account adoption metadata, workload identity wiring, private Anyscale Gateway resources using `gatewayClassName: approuting-istio`, and the NVIDIA device plugin before the extension-managed operator path is exercised.
 - The Anyscale AKS extension must receive `networking.gateway.*` settings that point at the `approuting-istio` Gateway. Without those settings, the operator can emit legacy `Ingress` objects instead of Gateway API `HTTPRoute` resources, leaving workspaces stuck in `STARTING` even when Ray pods are healthy.
-- The current validated baseline verifies the Azure cloud endpoint certificate during deploy. The docs should not center the architecture around the older cloud-endpoint mismatch story anymore.
+- The deployment baseline verifies the Azure cloud endpoint certificate during deploy, so the docs should center on the current Gateway API and TLS lifecycle.
 - Private workspace and service URLs surface under `*.azure.anyscaleuserdata.com`; use the in-VNet jump host or the Bastion-backed browser helpers when testing those hostnames.
-- The latest validated workload run was `.cache/aks-anyscale-sample-harness/runs/20260611T154800Z-workload-all`; prepare, CPU Ray, GPU Ray, CPU build, GPU train, and GPU Serve all passed. The Serve proof returned `GPU_SERVE_SERVICE_PROOF_OK` with accuracy `1.0` from inside the private AKS path.
+- A complete workload proof should emit the CPU Ray, GPU Ray, CPU build-job, GPU train-job, and GPU Serve service proof markers from the private AKS path.
 
 ## Operational Assumptions
 
 - Treat local access to the private cluster as Bastion-first for `kubectl`, Helm, validation helpers, and post-deploy Anyscale tasks.
 - Treat private workspace and service HTTP(S) access as Gateway-backed data-plane traffic. Use the in-VNet jump host or the Bastion-backed browser helpers when testing private hostnames.
+- The bootstrap path now labels the operator and GPU namespaces with Pod Security Admission baseline labels so the sample starts from a more restrictive runtime posture without requiring a custom privileged workload profile.
+- The bootstrap path now also applies a conservative NetworkPolicy baseline to those namespaces: ingress is denied by default, same-namespace ingress is allowed, and egress to DNS and same-namespace pods is allowed. Add workload-specific allow-rules as new services or dependencies are introduced.
+- The bootstrap path now applies namespace-level resource guardrails as well: a default LimitRange sets sane CPU and memory defaults, and a ResourceQuota caps aggregate namespace consumption so accidental oversubscription is easier to detect and contain.
+- When troubleshooting pod startup or admission failures, inspect the namespace labels and the pod events together: `kubectl get ns <namespace> --show-labels` and `kubectl describe pod <name> -n <namespace>` are the first checks after a failed schedule or admission event. Baseline enforcement can block privileged or host-exposed workloads even when the image itself is otherwise healthy.
+- Prefer Entra-backed AKS administration over local cluster accounts. If a temporary exception is required, set the AKS Terraform inputs for local accounts, Defender, and Key Vault Secrets Provider explicitly before apply.
 - In private mode, local direct curls to `*.s.azure.anyscaleuserdata.com` can time out from an unrouted workstation while the same service succeeds from an AKS pod. Keep the harness's in-cluster service probe fallback as the source of truth unless the request originates from inside the VNet (jump host) with private DNS.
 - Keep the CPU pool schedulable for operator components and supporting system workloads.
 - Keep GPU pools tainted and rely on explicit selectors and tolerations for GPU workloads.
@@ -25,13 +31,14 @@ This file keeps the implementation facts behind the main [README](../README.md).
 ## Supporting Notes
 
 - The primary Anyscale TLS secret is expected after cloud and operator setup; the service TLS secret is expected only after an Anyscale service is deployed. Normalize underscores in the cloud deployment ID to hyphens for both Kubernetes secret names.
-- The service HTTPS Gateway listener should be enabled only after the service TLS secret exists. The latest validated Gateway kept only `http` and `https`; the service TLS secret appeared after service deployment, but the optional `https-service` listener was not enabled in that run.
+- The service HTTPS Gateway listener should be enabled only after the service TLS secret exists. The default Gateway listeners are `http` and `https`.
+- When a workload pod reaches `Pending` or `CrashLoopBackOff`, check the namespace baseline first, then the pod's `securityContext`, `seccompProfile`, and required capabilities. The current sample intentionally uses the baseline profile rather than a privileged profile so pod admission failures will surface as policy violations rather than silent runtime drift.
 - Private Anyscale job logs may need workspace-side retrieval because Blob-backed log URLs are private to the workspace network.
 - If you capture local validation transcripts while iterating, keep them under `.cache/` so they remain local-only artifacts instead of repository content.
 
 ## Public Preview Source Docs
 
-Compiled: 2026-06-10
+Reference links used by the sample:
 
 - [Overview](https://learn.microsoft.com/en-us/azure/anyscale-on-azure/overview)
 - [Quickstart with Envoy Gateway](https://learn.microsoft.com/en-us/azure/anyscale-on-azure/quickstart-azure-cli-gateway-envoy)
@@ -165,9 +172,9 @@ Compiled: 2026-06-10
 - Public Preview support is best effort, and users should check preview limitations before opening cases.
 - Anyscale on Azure launch support references Enterprise tier SLAs in the support model article, while the preview articles also state preview terms apply.
 
-## Sample-Relevant Deltas
+## Sample Guidance
 
-- Prefer Azure Native Integration and Anyscale Clouds Resource Provider framing over older marketplace/operator-first language.
+- Use Azure Native Integration and Anyscale Clouds Resource Provider framing instead of marketplace/operator-first language.
 - Keep AKS private cluster, outbound-only control plane communication, managed identities, Azure Firewall egress, and Standard Load Balancer design.
 - Add Microsoft Learn docs domain to locked-down egress if AKS-side automation or diagnostics need to reach the docs.
 - Update Anyscale egress domains to include Azure-specific control plane, registry, Grafana, and user data routing domains from the Learn networking doc.

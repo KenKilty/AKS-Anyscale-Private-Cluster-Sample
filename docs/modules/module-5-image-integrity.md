@@ -37,7 +37,10 @@ preview is not for production registries or workloads.
 Signing proves an image came from a trusted publisher and was not modified after
 build. Image Integrity lets a platform team continuously check that workloads run
 only signed images, and surface any that are not — a supply-chain control on top
-of the private data plane you built in Modules 1–4.
+of the private data plane you built in Modules 1–4. It complements the cluster
+hardening already in place by giving you a second control point: even with the
+namespace and pod-security defaults in place, the image signature check tells you
+whether the container content itself is trusted and unchanged.
 
 ## How it works
 
@@ -186,7 +189,7 @@ The unsigned pod appears as non-compliant; the signed pod does not.
   update operation on the cluster. Re-run `module 5 apply-ratify` once the
   `gatekeeper-system` Ratify pod is running, or trigger a policy remediation.
 - **`apply-ratify` reports it cannot read Terraform outputs** — this is expected
-  on the jump host, which has no Terraform state. Re-sync the latest scripts and
+  on the jump host, which has no Terraform state. Re-sync the current scripts and
   re-run; the harness derives the Key Vault URI, ACR login server, and Ratify
   client id from `.env`/Azure when Terraform state is unavailable.
 - **Both images show compliant** — confirm the unsigned image has a different

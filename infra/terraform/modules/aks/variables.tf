@@ -174,6 +174,36 @@ variable "azure_policy_enabled" {
   default     = false
 }
 
+variable "automatic_upgrade_channel" {
+  description = "AKS automatic upgrade channel for control plane and node pools."
+  type        = string
+  default     = "patch"
+}
+
+variable "node_os_upgrade_channel" {
+  description = "AKS node OS image upgrade channel."
+  type        = string
+  default     = "SecurityPatch"
+}
+
+variable "local_account_disabled" {
+  description = "Disable local cluster admin accounts and require Entra-backed access for cluster administration."
+  type        = bool
+  default     = true
+}
+
+variable "defender_enabled" {
+  description = "Enable Microsoft Defender for Containers on the AKS cluster."
+  type        = bool
+  default     = true
+}
+
+variable "key_vault_secrets_provider_enabled" {
+  description = "Enable the AKS Key Vault Secrets Provider add-on for workload secret delivery via CSI."
+  type        = bool
+  default     = true
+}
+
 ###############################################################################
 # Cluster access principals (explicit RBAC — do not bind operational access to
 # whichever principal happens to run Terraform).

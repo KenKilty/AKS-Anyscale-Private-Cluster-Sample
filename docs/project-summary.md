@@ -257,7 +257,7 @@ sequence unattended when the environment and credentials are ready.
 
 ## Rules and Anti-Patterns
 
-These rules are enforced by repo instructions and prior validation.
+These rules are enforced by repo instructions and the quality gates for each path.
 
 ### Do
 
@@ -328,7 +328,7 @@ Terraform providers are declared in
 | `workloads/image-integrity/` | Ratify verifier and trust policy manifests. |
 | `docs/modules/` | Guided module documentation. |
 | `docs/diagrams/` | Editable project summary diagrams and PNG exports. |
-| `docs/RESULTS.md` | Latest recorded validation evidence. |
+| `docs/RESULTS.md` | Current proof-marker checklist and guidance for reading generated results. |
 | `.github/instructions/` | Path-scoped coding instructions. |
 | `.env-template` | Template for local `.env`; real `.env` is git-ignored. |
 

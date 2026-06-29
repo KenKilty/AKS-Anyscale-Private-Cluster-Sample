@@ -58,6 +58,192 @@ setup_kubeconfig() {
   log "Kubeconfig ready (${KUBECONFIG})"
 }
 
+wait_for_api_server() {
+  local attempts=0
+  while [[ ${attempts} -lt 30 ]]; do
+    if kubectl get --raw=/livez >/dev/null 2>&1; then
+      return 0
+    fi
+    attempts=$((attempts + 1))
+    warn "AKS API server not reachable yet (attempt ${attempts}/30); waiting 10s..."
+    sleep 10
+  done
+  die "Timed out waiting for the AKS API server to become reachable."
+}
+
+wait_for_helm_release() {
+  local release_name="$1"
+  local namespace="$2"
+  local attempts=0
+
+  while [[ ${attempts} -lt 12 ]]; do
+    if helm status "${release_name}" --namespace "${namespace}" >/dev/null 2>&1; then
+      return 0
+    fi
+    attempts=$((attempts + 1))
+    warn "Helm release ${release_name} not ready yet (attempt ${attempts}/12); waiting 15s..."
+    sleep 15
+  done
+
+  die "Timed out waiting for Helm release ${release_name} in namespace ${namespace}."
+}
+
+recover_stuck_helm_release() {
+  local release_name="$1"
+  local namespace="$2"
+  local release_status
+  local attempts=0
+
+  release_status="$(helm status "${release_name}" --namespace "${namespace}" --output json 2>/dev/null | jq -r '.info.status // empty' || true)"
+  if [[ "${release_status}" != "pending-upgrade" && "${release_status}" != "pending-install" && "${release_status}" != "pending-rollback" ]]; then
+    return 0
+  fi
+
+  warn "Helm release ${release_name} is in ${release_status}; clearing the stuck state and retrying."
+  helm uninstall "${release_name}" --namespace "${namespace}" --wait=false >/dev/null 2>&1 || true
+
+  while [[ ${attempts} -lt 12 ]]; do
+    if ! helm status "${release_name}" --namespace "${namespace}" >/dev/null 2>&1 && \
+      ! kubectl get secrets -n "${namespace}" -o name 2>/dev/null | grep -qE "^secret/sh\\.helm\\.release\\.v1\\.${release_name}\\."; then
+      return 0
+    fi
+    attempts=$((attempts + 1))
+    sleep 10
+  done
+
+  kubectl delete secret -n "${namespace}" --ignore-not-found \
+    $(kubectl get secrets -n "${namespace}" -o name 2>/dev/null | grep -E "^secret/sh\\.helm\\.release\\.v1\\.${release_name}\\." | tr '\n' ' ' || true) >/dev/null 2>&1 || true
+}
+
+apply_namespace_pod_security() {
+  local namespace="$1"
+  local policy_level="${2:-baseline}"
+
+  kubectl label namespace "${namespace}" \
+    pod-security.kubernetes.io/enforce="${policy_level}" \
+    pod-security.kubernetes.io/audit="${policy_level}" \
+    pod-security.kubernetes.io/warn="${policy_level}" \
+    --overwrite >/dev/null
+
+  log "Applied Pod Security Admission ${policy_level} labels to namespace ${namespace}."
+}
+
+apply_namespace_network_policy() {
+  local namespace="$1"
+
+  kubectl apply -f - <<EOF
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: ${namespace}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress: []
+EOF
+
+  kubectl apply -f - <<EOF
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-same-namespace-ingress
+  namespace: ${namespace}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector: {}
+EOF
+
+  kubectl apply -f - <<EOF
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-same-namespace-and-dns-egress
+  namespace: ${namespace}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector: {}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+EOF
+
+  log "Applied NetworkPolicy baseline to namespace ${namespace}."
+}
+
+remove_namespace_resource_policy() {
+  local namespace="$1"
+
+  kubectl delete limitrange default-resource-limits -n "${namespace}" --ignore-not-found=true >/dev/null 2>&1 || true
+  kubectl delete resourcequota namespace-quota -n "${namespace}" --ignore-not-found=true >/dev/null 2>&1 || true
+
+  log "Removed resource guardrails from namespace ${namespace}."
+}
+
+apply_namespace_resource_policy() {
+  local namespace="$1"
+
+  kubectl apply -f - <<EOF
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: default-resource-limits
+  namespace: ${namespace}
+spec:
+  limits:
+    - type: Container
+      # Keep namespace defaults compatible with the Anyscale operator's
+      # 1 CPU request while still preventing runaway workloads.
+      default:
+        cpu: "1"
+        memory: "1Gi"
+      defaultRequest:
+        cpu: "500m"
+        memory: "512Mi"
+      max:
+        cpu: "4"
+        memory: 8Gi
+      min:
+        cpu: 50m
+        memory: 64Mi
+EOF
+
+  kubectl apply -f - <<EOF
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: namespace-quota
+  namespace: ${namespace}
+spec:
+  hard:
+    pods: "50"
+    requests.cpu: "16"
+    requests.memory: 32Gi
+    limits.cpu: "32"
+    limits.memory: 64Gi
+EOF
+
+  log "Applied resource guardrails to namespace ${namespace}."
+}
+
 # Build and deploy the Anyscale Gateway helm release.
 # Args: cloud_deployment_id (empty string for phase-a)
 gateway_upgrade() {
@@ -124,10 +310,20 @@ phase_a() {
   require_var GATEWAY_PRIVATE_IP
 
   setup_kubeconfig
+  wait_for_api_server
 
   # 1. Operator namespace (idempotent via dry-run/apply)
   log "Applying operator namespace ${OPERATOR_NAMESPACE} ..."
   kubectl create namespace "${OPERATOR_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+  # The Anyscale operator deploys an init container that requires capability and
+  # privileged settings, so it must use the privileged Pod Security profile.
+  # It also needs outbound access to Azure identity and the Anyscale control
+  # plane, so do not apply the default NetworkPolicy egress restriction here.
+  # The marketplace chart needs a namespace without conflicting ResourceQuota or
+  # LimitRange defaults, so remove any stale guardrails and keep the pod specs
+  # under the chart's own control.
+  apply_namespace_pod_security "${OPERATOR_NAMESPACE}" privileged
+  remove_namespace_resource_policy "${OPERATOR_NAMESPACE}"
 
   # 2. Operator ServiceAccount with exact workload-identity labels + annotations
   log "Applying ServiceAccount ${OPERATOR_SA_NAME} ..."
@@ -150,6 +346,9 @@ EOF
   # 3. GPU resources namespace (idempotent)
   log "Applying GPU resources namespace ${GPU_RESOURCES_NAMESPACE} ..."
   kubectl create namespace "${GPU_RESOURCES_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+  apply_namespace_pod_security "${GPU_RESOURCES_NAMESPACE}" privileged
+  apply_namespace_network_policy "${GPU_RESOURCES_NAMESPACE}"
+  apply_namespace_resource_policy "${GPU_RESOURCES_NAMESPACE}"
 
   # 4. NVIDIA device plugin
   log "Installing NVIDIA device plugin ${NVIDIA_CHART_VERSION} into ${GPU_RESOURCES_NAMESPACE} ..."
@@ -178,12 +377,17 @@ tolerations:
     effect: NoSchedule
 NVVALS
 
+  if helm status "${NVIDIA_RELEASE_NAME}" --namespace "${GPU_RESOURCES_NAMESPACE}" >/dev/null 2>&1; then
+    recover_stuck_helm_release "${NVIDIA_RELEASE_NAME}" "${GPU_RESOURCES_NAMESPACE}"
+  fi
+
   helm upgrade --install "${NVIDIA_RELEASE_NAME}" nvdp/nvidia-device-plugin \
     --version "${NVIDIA_CHART_VERSION}" \
     --namespace "${GPU_RESOURCES_NAMESPACE}" \
     --values "${nvidia_values_file}" \
-    --wait
+    --wait --timeout 15m
   rm -f "${nvidia_values_file}"
+  wait_for_helm_release "${NVIDIA_RELEASE_NAME}" "${GPU_RESOURCES_NAMESPACE}"
   log "NVIDIA device plugin installed."
 
   # 5. Anyscale Gateway (phase-a: cloud_deployment_id empty → no TLS listener entries)

@@ -39,7 +39,16 @@ only (ARM/AzAPI) and uses **local state** on your machine. The in-cluster
 bootstrap (operator namespace and service account, the NVIDIA device plugin, and
 the Anyscale gateway) runs **on the Linux jump host** as idempotent kubectl/helm
 steps via `scripts/bootstrap-k8s.sh`, invoked over a Bastion tunnel — **Terraform
-never runs on the jump box**.
+never runs on the jump box**. The AKS cluster also applies the current hardening
+baseline by default: local cluster admin accounts are disabled, Microsoft
+Defender for Containers is enabled, the Key Vault Secrets Provider add-on is
+enabled, the bootstrap path labels the operator and GPU namespaces with Pod
+Security Admission baseline controls, the bootstrap path applies a
+conservative NetworkPolicy baseline that denies ingress by default while
+preserving same-namespace and DNS traffic, and the bootstrap path applies
+resource guardrails so the namespaces have sensible default requests/limits and
+aggregate quotas. Use Entra-backed access for day-to-day operations; opt out
+only for a temporary break-glass exception.
 
 ## Prerequisites
 
@@ -116,6 +125,11 @@ Plane](module-4-custom-image.md) after this module's proofs pass.
 
 ## Exercise 3: Run the workload proofs
 
+Run the full proof from the Linux jump host after Module 2 is synced and
+bootstrapped. The CPU/GPU Ray probes can be inspected from either side, but the
+Anyscale build, train, and serve proofs upload a working directory to private
+storage and are meant to execute from inside the VNet.
+
 ```bash
 ./scripts/anyscale-aks.sh module 3 proof all
 ```
@@ -136,6 +150,13 @@ GPU_TRAIN_JOB_PROOF_OK
 service_state=STARTING primary_version_state=RUNNING
 GPU_SERVE_SERVICE_PROOF_OK
 ```
+
+On a cold GPU pool, the train and serve stages can spend several minutes in
+startup while AKS scales the T4 node pool, pulls images, and initializes the
+NVIDIA device plugin. For services, the Anyscale top-level service state can
+briefly lag the running version and endpoint: the harness treats a running
+primary version plus successful endpoint proof as the meaningful readiness
+signal.
 
 ## Validate Your Work
 
@@ -186,6 +207,13 @@ validation was skipped and points you to `module 3 browser validate`.
 - **Terraform init/apply fails on the workstation** — the lab uses
   **local state** and Azure control-plane (ARM/AzAPI) only; confirm your `az`
   login can reach `management.azure.com`.
+- **Job proof upload fails from the workstation** — rerun the proof from the
+  Linux jump host. In the private lab, Anyscale working directories are uploaded
+  to private Storage Blob/DFS endpoints that resolve and route only inside the
+  VNet.
+- **GPU train or serve appears slow** — check whether the GPU node pool is
+  scaling from zero or pulling images. This is expected on a cold run; wait for
+  the proof marker before treating `STARTING` as a failure.
 
 ## Summary
 

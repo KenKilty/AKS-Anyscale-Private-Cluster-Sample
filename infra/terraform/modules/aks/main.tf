@@ -66,11 +66,14 @@ resource "azurerm_kubernetes_cluster" "this" {
   workload_identity_enabled = true
 
   role_based_access_control_enabled = true
-  local_account_disabled            = false
+  local_account_disabled            = var.local_account_disabled
 
   # Azure Policy add-on — required for the AKS Image Integrity (Preview) feature,
   # which is delivered through an Azure Policy built-in initiative + Gatekeeper.
   azure_policy_enabled = var.azure_policy_enabled
+
+  automatic_upgrade_channel = var.automatic_upgrade_channel
+  node_os_upgrade_channel   = var.node_os_upgrade_channel
 
   azure_active_directory_role_based_access_control {
     tenant_id          = var.azure_tenant_id
@@ -112,6 +115,20 @@ resource "azurerm_kubernetes_cluster" "this" {
     identity_ids = [azurerm_user_assigned_identity.aks_control_plane.id]
   }
 
+  dynamic "microsoft_defender" {
+    for_each = var.defender_enabled ? [1] : []
+    content {
+      log_analytics_workspace_id = var.log_analytics_workspace_id
+    }
+  }
+
+  dynamic "key_vault_secrets_provider" {
+    for_each = var.key_vault_secrets_provider_enabled ? [1] : []
+    content {
+      secret_rotation_enabled = true
+    }
+  }
+
   oms_agent {
     log_analytics_workspace_id      = var.log_analytics_workspace_id
     msi_auth_for_monitoring_enabled = true
@@ -130,6 +147,23 @@ resource "azurerm_kubernetes_cluster" "this" {
     azurerm_role_assignment.cp_network_contrib_nodes,
     azurerm_role_assignment.cp_network_contrib_apiserver,
     azurerm_role_assignment.cp_pdns_contrib,
+  ]
+}
+
+resource "time_sleep" "app_routing_istio_reconcile_wait" {
+  create_duration = "600s"
+
+  triggers = {
+    cluster_id   = azurerm_kubernetes_cluster.this.id
+    cpu_pool_id  = azurerm_kubernetes_cluster_node_pool.cpu.id
+    gpu_pools    = length(values(azurerm_kubernetes_cluster_node_pool.gpu)) > 0 ? "present" : "none"
+    gpu_pool_ids = length(values(azurerm_kubernetes_cluster_node_pool.gpu)) > 0 ? "present" : "none"
+  }
+
+  depends_on = [
+    azurerm_kubernetes_cluster.this,
+    azurerm_kubernetes_cluster_node_pool.cpu,
+    azurerm_kubernetes_cluster_node_pool.gpu,
   ]
 }
 
@@ -165,11 +199,12 @@ resource "azapi_update_resource" "app_routing_istio" {
     update = "1h"
   }
 
-  # AKS rejects the preview ingress patch while node-pool operations are still
-  # mutating the same managed cluster.
+  # AKS can reject the preview ingress patch while the control plane is still
+  # reconciling node-pool changes from the same cluster. Wait briefly after the
+  # initial node-pool creation cycle so the patch is applied after the cluster
+  # is no longer in an update storm.
   depends_on = [
-    azurerm_kubernetes_cluster_node_pool.cpu,
-    azurerm_kubernetes_cluster_node_pool.gpu,
+    time_sleep.app_routing_istio_reconcile_wait,
   ]
 }
 

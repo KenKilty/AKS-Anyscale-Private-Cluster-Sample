@@ -143,7 +143,7 @@ flowchart TB
 | Layer | Components | Why it's here |
 | --- | --- | --- |
 | Networking | Private VNet, Azure Bastion, DNS Private Resolver, Azure Firewall, and private endpoints. | Isolates the AKS data plane and forces controlled, allow-listed egress. |
-| AKS | Private AKS cluster with system, CPU, and GPU pools, OIDC issuer, Workload Identity, managed Gateway API installation, and app-routing Istio via `approuting-istio`. | Runs Ray workloads with no public API server and a private Layer 7 entry point. |
+| AKS | Private AKS cluster with system, CPU, and GPU pools, OIDC issuer, Workload Identity, managed Gateway API installation, and app-routing Istio via `approuting-istio`. The cluster defaults to Entra-backed admin access with local accounts disabled, Microsoft Defender for Containers enabled, and the Key Vault Secrets Provider add-on enabled. | Runs Ray workloads with no public API server and a private Layer 7 entry point while keeping the control plane aligned with enterprise hardening defaults. |
 | Cluster bootstrap | Namespaces, operator service-account adoption metadata, workload identity wiring, the Anyscale Gateway chart, and the NVIDIA device plugin. | Prepares the cluster for the Anyscale operator and GPU scheduling. |
 | Private dependencies | ADLS Gen2 with private endpoints, Premium ACR with Private Link, and Azure RBAC wiring for the operator identity. | Keeps storage and images private-only, reachable only from inside the VNet. |
 | Anyscale platform | Azure-native Anyscale cloud ARM resource, AKS extension, built-in Anyscale Platform role assignments, `aks-cpu` and `aks-gpu` compute configs, and durable `aks-cpu-workspace` and `aks-gpu-workspace` workspaces. | Registers the Anyscale cloud on Azure and provisions reproducible workspaces. |
@@ -158,6 +158,7 @@ flowchart TB
 - Keep Blob, DFS, and ACR private-only and test both in-cluster and submitter-machine access paths.
 - Force node egress through Azure Firewall and maintain the documented allow-lists for Anyscale, Microsoft identity, Monitor, registries, and NVIDIA endpoints.
 - Use AKS-managed Gateway API and app-routing Istio as the private Layer 7 entry point for browser, dashboard, and service traffic.
+- Default to Entra-backed AKS administration; local cluster admin accounts are disabled unless you explicitly opt out for a temporary break-glass scenario.
 - Keep deterministic validation in the repo so each architecture claim can be tested again later.
 
 ## Hostnames and trust boundaries
@@ -170,7 +171,7 @@ flowchart TB
 | Workspace session host | `session-{id}.i.azure.anyscaleuserdata.com` | Private workspace and Ray dashboard browser path. |
 | Service host | `{service}.cld-{id}.s.azure.anyscaleuserdata.com` | Private Anyscale service path. |
 
-The validated baseline no longer depends on historical cloud-endpoint certificate issues as the primary architecture explanation. `scripts/anyscale-aks.sh deploy` now validates the Azure cloud endpoint certificate before workspace registration, and the current validated environment presented a matching certificate for `cld-*.azure.anyscale-cloud.dev`. The browser helper default remains `console.anyscale.com`, while CLI and platform automation remain pinned to `console.azure.anyscale.com`.
+`scripts/anyscale-aks.sh deploy` validates the Azure cloud endpoint certificate before workspace registration. The browser helper default is `console.anyscale.com`, while CLI and platform automation use `console.azure.anyscale.com`.
 
 ## Repository layout
 
@@ -343,9 +344,7 @@ GPU_SERVE_SERVICE_PROOF_OK
 
 The proof flow pushes the scripts in `workloads/proofs/`, runs them through the Anyscale CLI or the Kubernetes-backed fallbacks built into the harness, checks the expected markers, and writes diagnostics under `.cache/aks-anyscale-sample-harness/runs/<timestamp>-workload-*/`.
 
-In the validated private AKS path, Anyscale job logs and service endpoint probes may need to run from inside the private workspace network. The harness detects successful jobs whose local submit stream missed a marker and retrieves logs from the workspace head pod; service probes retry from a service head pod inside AKS when direct workstation access to the private `*.s.azure.anyscaleuserdata.com` hostname times out.
-
-The latest validated workload run was `.cache/aks-anyscale-sample-harness/runs/20260611T154800Z-workload-all`: prepare, CPU Ray, GPU Ray, CPU build, GPU train, and GPU Serve all passed. The Serve health check returned `GPU_SERVE_SERVICE_PROOF_OK` with model accuracy `1.0`; the service probe succeeded from inside AKS after direct workstation access to the private service URL failed.
+In the validated private AKS path, Anyscale job logs and service endpoint probes may need to run from inside the private workspace network. The harness detects successful jobs whose local submit stream missed a marker and retrieves logs from the workspace head pod; service probes retry from a service head pod inside AKS when direct workstation access to the private `*.s.azure.anyscaleuserdata.com` hostname times out. A complete workload proof is successful when all expected CPU, GPU, build, train, and serve markers are emitted.
 
 ### Full run results
 
@@ -357,7 +356,7 @@ The full e2e command writes a short local report to `RESULTS.md` at the repo roo
 
 For the custom-image scenario, `e2e --custom-image` deploys and verifies through Bastion-backed AKS access, then builds and pushes the custom image from the in-VNet Linux jump host where the private ACR endpoints resolve. It runs `prove-failure`, `preflight`, `prepare`, `apply`, and `proof`; it does not sign or verify the image. Resume with `custom-image prepare`, `custom-image apply`, `custom-image proof`, and `proof all`. Sign and verify the image with the explicit `module 4 sign` and `module 4 verify` steps — both are required before Module 5 image-integrity verification.
 
-The report is intentionally not tracked by Git. It records whether build-up, full verification, all workload proofs, and teardown passed, plus the latest run-summary paths.
+The report is intentionally not tracked by Git. It records whether build-up, full verification, workload proofs, and teardown passed for that invocation.
 
 ## Private access options
 
@@ -398,7 +397,7 @@ This sample treats AKS-managed Gateway API and app-routing Istio as the target p
 - The primary TLS secret `anyscale-<cloud-deployment-id-with-hyphens>-certificate` is expected after the Azure-native cloud and operator setup completes.
 - The service TLS secret `anyscale-svc-<cloud-deployment-id-with-hyphens>-certificate` appears after an Anyscale service is deployed; enable `cluster_bootstrap.gateway_service_https_enabled` after that secret exists to add the service HTTPS listener.
 - The Gateway has an HTTPS listener for `*.i.azure.anyscaleuserdata.com` by default and can add the `*.s.azure.anyscaleuserdata.com` service listener, matching the Anyscale on Azure Gateway API guidance while using AKS app-routing Istio as the managed Gateway implementation.
-- The latest validated Gateway kept the default `http` and `https` listeners and reported `Accepted=True`, `Programmed=True`, and `ResolvedRefs=True`; the service TLS secret appeared after the Serve proof, but the optional `https-service` listener was not enabled for that run.
+- The default Gateway listeners are `http` and `https`. The optional `https-service` listener should be enabled only after the service TLS secret exists.
 - `verify --live` reports Gateway reachability, listener conditions, primary certificate state, and service-certificate pending or present state.
 
 ## Day-2 operations
@@ -460,14 +459,14 @@ If the Anyscale cloud resource is already gone, the force teardown path skips th
 
 ## Validated baseline and caveats
 
-The current validated baseline targets Kubernetes `1.34.6` in `westus3`.
+The baseline targets Kubernetes `1.34.6` in `westus3`.
 
 Known non-blocking caveats:
 
 - The operator pod can still emit recurring `502 Bad Gateway` warnings from the `vector` sidecar telemetry sinks on `http://localhost:3100` and `http://localhost:3101/api/v1/push`.
 - The custom GPU instance type still needs the legacy resource key `'accelerator_type:T4': 1` alongside `accelerators: [T4]` for the current admission path.
 - `anyscale job submit --working-dir` still uploads through the submitter machine first, so private Blob and DFS access from the submitter must be validated separately from in-cluster Workload Identity.
-- Normal Terraform teardown can still fail late if the Kubernetes provider loses Bastion-backed API access while deleting Kubernetes resources. The force teardown path is the supported recovery path and was validated in the latest run.
+- Normal Terraform teardown can still fail late if the Kubernetes provider loses Bastion-backed API access while deleting Kubernetes resources. The force teardown path is the supported recovery path for that condition.
 
 ## Related docs
 

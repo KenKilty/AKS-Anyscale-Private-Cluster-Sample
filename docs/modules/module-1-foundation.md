@@ -38,7 +38,10 @@ Bastion, jump hosts, DNS, routing, and firewall pieces that later stages use.
 
 Keeping the jump hosts **private** (no public IP, Bastion-only access) is the
 core security posture of this lab. The managed identity on the Linux host means
-automation never needs a stored secret.
+automation never needs a stored secret. The AKS cluster created in later modules
+uses a hardened default posture as well: local cluster admin accounts are
+disabled, Microsoft Defender for Containers is enabled, and the Key Vault
+Secrets Provider add-on is enabled for workload secret delivery.
 
 ## Prerequisites
 

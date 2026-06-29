@@ -48,7 +48,11 @@ output "private_mode" {
     oidc_issuer_enabled                 = azurerm_kubernetes_cluster.this.oidc_issuer_enabled
     workload_identity_enabled           = azurerm_kubernetes_cluster.this.workload_identity_enabled
     azure_rbac_enabled                  = azurerm_kubernetes_cluster.this.azure_active_directory_role_based_access_control[0].azure_rbac_enabled
+    automatic_upgrade_channel           = azurerm_kubernetes_cluster.this.automatic_upgrade_channel
+    node_os_upgrade_channel             = azurerm_kubernetes_cluster.this.node_os_upgrade_channel
     local_account_disabled              = azurerm_kubernetes_cluster.this.local_account_disabled
+    defender_enabled                    = length(azurerm_kubernetes_cluster.this.microsoft_defender) > 0
+    key_vault_secrets_provider_enabled  = length(azurerm_kubernetes_cluster.this.key_vault_secrets_provider) > 0
     app_routing_istio_enabled           = local.app_routing_istio_enabled
     app_routing_istio_gateway_class     = local.app_routing_istio_gateway_class
     managed_gateway_api_installation    = local.managed_gateway_api_installation

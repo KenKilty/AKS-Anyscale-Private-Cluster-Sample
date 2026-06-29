@@ -363,6 +363,11 @@ module "aks" {
   anyscale_operator_serviceaccount            = var.anyscale_operator_serviceaccount
   acr_id                                      = module.acr.acr_id
   azure_policy_enabled                        = var.azure_policy_enabled
+  automatic_upgrade_channel                   = var.automatic_upgrade_channel
+  node_os_upgrade_channel                     = var.node_os_upgrade_channel
+  local_account_disabled                      = var.local_account_disabled
+  defender_enabled                            = var.defender_enabled
+  key_vault_secrets_provider_enabled          = var.key_vault_secrets_provider_enabled
 
   assign_current_principal_cluster_access = var.assign_current_principal_cluster_access
   cluster_admin_principal_ids = merge(

@@ -15,8 +15,14 @@ LOG_INFO_PREFIX="setup"
 source "${ROOT_DIR}/scripts/lib/log.sh"
 # shellcheck source=./lib/timeout.sh
 source "${ROOT_DIR}/scripts/lib/timeout.sh"
+# shellcheck source=./lib/azure-cli-env.sh
+source "${ROOT_DIR}/scripts/lib/azure-cli-env.sh"
+# shellcheck source=./lib/anyscale-job-submit.sh
+source "${ROOT_DIR}/scripts/lib/anyscale-job-submit.sh"
 
 cd "${TERRAFORM_DIR}"
+
+ensure_azure_cli_environment
 
 HARNESS_DIR="${CACHE_DIR}/aks-anyscale-sample-harness"
 VALIDATION_REPORT_ROOT="${CACHE_DIR}/focused-validation"
@@ -31,6 +37,8 @@ SETUP_TIMEOUT_TERRAFORM_TEST_SECONDS="${SETUP_TIMEOUT_TERRAFORM_TEST_SECONDS:-12
 SETUP_TIMEOUT_TERRAFORM_PLAN_SECONDS="${SETUP_TIMEOUT_TERRAFORM_PLAN_SECONDS:-1800}"
 SETUP_TIMEOUT_TERRAFORM_APPLY_SECONDS="${SETUP_TIMEOUT_TERRAFORM_APPLY_SECONDS:-7200}"
 SETUP_TIMEOUT_TERRAFORM_DESTROY_SECONDS="${SETUP_TIMEOUT_TERRAFORM_DESTROY_SECONDS:-7200}"
+SETUP_TERRAFORM_RETRY_ATTEMPTS="${SETUP_TERRAFORM_RETRY_ATTEMPTS:-6}"
+SETUP_TERRAFORM_RETRY_DELAY_SECONDS="${SETUP_TERRAFORM_RETRY_DELAY_SECONDS:-20}"
 SETUP_TIMEOUT_HELM_SECONDS="${SETUP_TIMEOUT_HELM_SECONDS:-900}"
 SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS="${SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS:-180}"
 SETUP_TIMEOUT_ANYSCALE_WORKSPACE_INSPECT_SECONDS="${SETUP_TIMEOUT_ANYSCALE_WORKSPACE_INSPECT_SECONDS:-60}"
@@ -338,6 +346,11 @@ require_cmd() {
 load_env() {
   local preserve_anyscale_platform=false
   local anyscale_platform_override=""
+  local preserve_anyscale_cli_token="${ANYSCALE_CLI_TOKEN:-}"
+  local preserve_tf_var_anyscale_cli_token="${TF_VAR_anyscale_cli_token:-}"
+  local preserve_anyscale_host="${ANYSCALE_HOST:-}"
+  local preserve_anyscale_cloud_name="${ANYSCALE_CLOUD_NAME:-}"
+  local preserve_anyscale_cloud_deployment_id="${ANYSCALE_CLOUD_DEPLOYMENT_ID:-}"
   local preserved_custom_image_names=()
   local preserved_custom_image_values=()
   local custom_image_name preserved_index
@@ -362,9 +375,11 @@ load_env() {
 
   [[ -f "${ENV_FILE}" ]] || die "Missing ${ENV_FILE}. Copy .env-template to .env and fill in the required values."
   # shellcheck disable=SC1090
+  set +u
   set -a
   source "${ENV_FILE}"
   set +a
+  set -u
 
   # Preserve the phase-scoped platform override after sourcing .env so callers
   # can temporarily disable or enable the Anyscale platform layer per deploy phase.
@@ -382,11 +397,29 @@ load_env() {
     export ANYSCALE_HOST
   fi
 
-  if [[ -z "${ANYSCALE_CLI_TOKEN:-}" ]]; then
+  if [[ -n "${preserve_anyscale_cli_token}" ]]; then
+    ANYSCALE_CLI_TOKEN="${preserve_anyscale_cli_token}"
+    export ANYSCALE_CLI_TOKEN
+  elif [[ -z "${ANYSCALE_CLI_TOKEN:-}" ]]; then
     unset ANYSCALE_CLI_TOKEN
   fi
-  if [[ -z "${TF_VAR_anyscale_cli_token:-}" ]]; then
+  if [[ -n "${preserve_tf_var_anyscale_cli_token}" ]]; then
+    TF_VAR_anyscale_cli_token="${preserve_tf_var_anyscale_cli_token}"
+    export TF_VAR_anyscale_cli_token
+  elif [[ -z "${TF_VAR_anyscale_cli_token:-}" ]]; then
     unset TF_VAR_anyscale_cli_token
+  fi
+  if [[ -n "${preserve_anyscale_host}" ]]; then
+    ANYSCALE_HOST="${preserve_anyscale_host}"
+    export ANYSCALE_HOST
+  fi
+  if [[ -n "${preserve_anyscale_cloud_name}" ]]; then
+    ANYSCALE_CLOUD_NAME="${preserve_anyscale_cloud_name}"
+    export ANYSCALE_CLOUD_NAME
+  fi
+  if [[ -n "${preserve_anyscale_cloud_deployment_id}" ]]; then
+    ANYSCALE_CLOUD_DEPLOYMENT_ID="${preserve_anyscale_cloud_deployment_id}"
+    export ANYSCALE_CLOUD_DEPLOYMENT_ID
   fi
 
   ANYSCALE_CUSTOM_IMAGE_ENABLED="${ANYSCALE_CUSTOM_IMAGE_ENABLED:-false}"
@@ -757,26 +790,105 @@ ensure_anyscale_marketplace_agreement_accepted() {
     --only-show-errors >/dev/null
 }
 
+anyscale_platform_extension_resource_name() {
+  local platform_config="${TF_VAR_anyscale_platform:-}"
+  local inferred_name="anyscaleoperator"
+
+  if [[ -n "${platform_config}" ]]; then
+    inferred_name="$(jq -r '.extension_resource_name // empty' <<<"${platform_config}" 2>/dev/null || true)"
+  fi
+
+  if [[ -n "${inferred_name}" && "${inferred_name}" != "null" ]]; then
+    printf '%s\n' "${inferred_name}"
+  else
+    printf '%s\n' "anyscaleoperator"
+  fi
+}
+
+ensure_anyscale_platform_role_assignment_state() {
+  local resource_address='azurerm_role_assignment.anyscale_platform["current_principal_admin"]'
+  local scope assignment_id current_principal_id admin_assignment_json assignment_scope
+
+  anyscale_platform_enabled || return 0
+  terraform state show "${resource_address}" >/dev/null 2>&1 && return 0
+
+  current_principal_id="$(current_azure_principal_object_id)"
+  [[ -n "${current_principal_id}" ]] || return 0
+
+  admin_assignment_json="${TF_VAR_anyscale_platform_default_admin_assignment:-}"
+  assignment_scope="subscription"
+  if [[ -n "${admin_assignment_json}" ]]; then
+    assignment_scope="$(jq -r '.scope // "subscription"' <<<"${admin_assignment_json}" 2>/dev/null || true)"
+  fi
+
+  case "${assignment_scope}" in
+    subscription)
+      scope="/subscriptions/${TF_VAR_azure_subscription_id}"
+      ;;
+    resource_group)
+      scope="/subscriptions/${TF_VAR_azure_subscription_id}/resourceGroups/$(resource_group_name)"
+      ;;
+    cloud)
+      scope="$(default_anyscale_cloud_arm_id)"
+      ;;
+    custom)
+      scope="$(jq -r '.custom_scope // empty' <<<"${admin_assignment_json}" 2>/dev/null || true)"
+      ;;
+    *)
+      scope="/subscriptions/${TF_VAR_azure_subscription_id}"
+      ;;
+  esac
+
+  [[ -n "${scope}" ]] || return 0
+
+  assignment_id="$(run_with_timeout "${SETUP_TIMEOUT_AZURE_COMMAND_SECONDS}" az role assignment list \
+    --assignee-object-id "${current_principal_id}" \
+    --scope "${scope}" \
+    --include-inherited false \
+    --query "[?roleDefinitionName=='Anyscale Platform Administrator Role' || roleDefinitionName=='Anyscale Platform Administrator'].id | [0]" \
+    -o tsv 2>/dev/null || true)"
+
+  if [[ -n "${assignment_id}" ]]; then
+    log "Importing existing Anyscale platform role assignment into Terraform state"
+    terraform import "${resource_address}" "${assignment_id}" >/dev/null
+  fi
+}
+
 ensure_anyscale_platform_deployment_state() {
   local resource_address="azapi_resource.anyscale_platform[0]"
-  local resource_group deployment_name deployment_id
+  local extension_resource_address="azurerm_kubernetes_cluster_extension.anyscale_operator[0]"
+  local resource_group deployment_name deployment_id extension_resource_id extension_resource_name
 
   anyscale_platform_enabled || return 0
 
   resource_group="$(resource_group_name)"
   deployment_name="$(anyscale_platform_deployment_name)"
   deployment_id="$(anyscale_platform_deployment_resource_id)"
+  extension_resource_name="$(anyscale_platform_extension_resource_name)"
+  extension_resource_id="/subscriptions/${TF_VAR_azure_subscription_id}/resourceGroups/${resource_group}/providers/Microsoft.ContainerService/managedClusters/$(target_aks_cluster_name)/providers/Microsoft.KubernetesConfiguration/extensions/${extension_resource_name}"
 
   if terraform state show "${resource_address}" >/dev/null 2>&1; then
-    return 0
-  fi
-
-  if run_with_timeout "${SETUP_TIMEOUT_AZURE_COMMAND_SECONDS}" az deployment group show \
+    :
+  elif run_with_timeout "${SETUP_TIMEOUT_AZURE_COMMAND_SECONDS}" az deployment group show \
     --resource-group "${resource_group}" \
     --name "${deployment_name}" \
     --only-show-errors >/dev/null 2>&1; then
     log "Importing existing Anyscale ARM deployment into Terraform state"
     terraform import "${resource_address}" "${deployment_id}" >/dev/null
+  fi
+
+  ensure_anyscale_platform_role_assignment_state
+
+  if terraform state show "${extension_resource_address}" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if run_with_timeout "${SETUP_TIMEOUT_AZURE_COMMAND_SECONDS}" az resource show \
+    --ids "${extension_resource_id}" \
+    --api-version 2024-11-01 \
+    --only-show-errors >/dev/null 2>&1; then
+    log "Importing existing Anyscale AKS extension into Terraform state"
+    terraform import "${extension_resource_address}" "${extension_resource_id}" >/dev/null
   fi
 }
 
@@ -2911,13 +3023,64 @@ validate() {
 # real, rendered configuration is syntactically valid.
 
 ###############################################################################
+run_terraform_command_with_retry() {
+  local action="$1"
+  local timeout_seconds="$2"
+  local success_exit_code="$3"
+  shift 3
+
+  local attempt=1
+  local max_attempts="${SETUP_TERRAFORM_RETRY_ATTEMPTS:-6}"
+  local delay_seconds="${SETUP_TERRAFORM_RETRY_DELAY_SECONDS:-20}"
+  local rc output_file
+
+  output_file="${CACHE_DIR}/terraform-${action}-retry.log"
+
+  while (( attempt <= max_attempts )); do
+    : > "${output_file}"
+    set +e
+    run_with_timeout "${timeout_seconds}" "$@" >"${output_file}" 2>&1
+    rc=$?
+    set -e
+
+    if [[ -s "${output_file}" ]]; then
+      cat "${output_file}"
+    fi
+
+    if [[ "${rc}" -eq 0 || "${rc}" -eq "${success_exit_code}" ]]; then
+      rm -f "${output_file}"
+      return 0
+    fi
+
+    if grep -Eqi 'Error acquiring the state lock|resource temporarily unavailable|Lock Info:' "${output_file}"; then
+      if (( attempt < max_attempts )); then
+        warn "Terraform ${action} hit a temporary state lock (attempt ${attempt}/${max_attempts}); retrying in ${delay_seconds}s."
+        sleep "${delay_seconds}"
+        attempt=$((attempt + 1))
+        continue
+      fi
+    fi
+
+    rm -f "${output_file}"
+    return "${rc}"
+  done
+
+  rm -f "${output_file}"
+  return "${rc}"
+}
+
+###############################################################################
 plan() {
   render_tfvars
   ensure_aks_app_routing_gateway_api
   ensure_anyscale_marketplace_agreement_accepted
   ensure_anyscale_platform_deployment_state
+  rm -f tfplan
   log "terraform plan -> tfplan"
-  run_with_timeout "${SETUP_TIMEOUT_TERRAFORM_PLAN_SECONDS}" terraform plan -input=false -out=tfplan
+  if ! run_terraform_command_with_retry "plan" "${SETUP_TIMEOUT_TERRAFORM_PLAN_SECONDS}" 0 \
+    terraform plan -input=false -out=tfplan; then
+    return 1
+  fi
 }
 
 ###############################################################################
@@ -2927,7 +3090,10 @@ apply() {
   ensure_anyscale_platform_deployment_state
   if [[ ! -f tfplan ]]; then plan; fi
   log "terraform apply tfplan (this will take ~20 min - Azure Firewall + AKS)"
-  run_with_timeout "${SETUP_TIMEOUT_TERRAFORM_APPLY_SECONDS}" terraform apply -auto-approve tfplan
+  if ! run_terraform_command_with_retry "apply" "${SETUP_TIMEOUT_TERRAFORM_APPLY_SECONDS}" 0 \
+    terraform apply -auto-approve tfplan; then
+    return 1
+  fi
   sync_anyscale_cli_env
   rm -f tfplan
 }
@@ -3219,8 +3385,21 @@ invoke_jump_host_bootstrap() {
   fi
 
   # ---- Open Bastion tunnel to jump host port 22 ----------------------------
-  local jh_port jh_pid known_hosts_file outer_exit_trap
-  jh_port="${BOOTSTRAP_BASTION_SSH_PORT:-50023}"
+  local jh_port requested_jh_port candidate_jh_port jh_pid known_hosts_file outer_exit_trap
+  requested_jh_port="${BOOTSTRAP_BASTION_SSH_PORT:-50023}"
+  jh_port="${requested_jh_port}"
+  if listener_is_ready "${jh_port}"; then
+    for ((candidate_jh_port = requested_jh_port + 1; candidate_jh_port <= requested_jh_port + 20; candidate_jh_port++)); do
+      if ! listener_is_ready "${candidate_jh_port}"; then
+        jh_port="${candidate_jh_port}"
+        warn "Local bootstrap SSH port ${requested_jh_port} is already in use; using ${jh_port} instead."
+        break
+      fi
+    done
+    if [[ "${jh_port}" == "${requested_jh_port}" ]]; then
+      die "Local bootstrap SSH port ${requested_jh_port} and the next 20 ports are already in use. Free a port or set BOOTSTRAP_BASTION_SSH_PORT to an open port."
+    fi
+  fi
   known_hosts_file="$(mktemp "${TMPDIR:-/tmp}/anyscale-bastion-known-hosts.XXXXXX")"
   outer_exit_trap="$(trap -p EXIT || true)"
   log "Opening Bastion tunnel to jump host on local port ${jh_port} ..."
@@ -3244,34 +3423,47 @@ invoke_jump_host_bootstrap() {
   done
   log "Bastion tunnel ready on 127.0.0.1:${jh_port} (pid ${jh_pid})."
 
-  local ssh_base_opts="-p ${jh_port} -i ${ssh_key} -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=${known_hosts_file}"
+  local ssh_base_opts="-p ${jh_port} -i ${ssh_key} -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=${known_hosts_file} -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=2"
   local ssh_target="${admin_user}@127.0.0.1"
 
-  # Ensure canonical path exists and is owned by the admin user.
-  # shellcheck disable=SC2029
-  ssh ${ssh_base_opts} "${ssh_target}" \
-    "sudo mkdir -p '${canonical_repo_path}/scripts/lib' \
-     && sudo mkdir -p '${canonical_repo_path}/infra/terraform/modules/cluster_bootstrap/charts' \
-     && sudo chown -R ${admin_user} '${canonical_repo_path}'"
+  # Ensure canonical path exists and is owned by the admin user. Bastion-backed
+  # SSH can briefly report connection-refused while the tunnel is still warming.
+  local ssh_attempt ssh_ok=0
+  for ssh_attempt in {1..6}; do
+    # shellcheck disable=SC2029
+    if ssh ${ssh_base_opts} "${ssh_target}" \
+      "sudo mkdir -p '${canonical_repo_path}/scripts/lib' \
+       && sudo mkdir -p '${canonical_repo_path}/infra/terraform/modules/cluster_bootstrap/charts' \
+       && sudo chown -R ${admin_user} '${canonical_repo_path}'" >/dev/null 2>&1; then
+      ssh_ok=1
+      break
+    fi
+    if [[ ${ssh_attempt} -lt 6 ]]; then
+      warn "Bastion-backed SSH is not ready yet (attempt ${ssh_attempt}/6); retrying in 5s..."
+      sleep 5
+    fi
+  done
+  [[ ${ssh_ok} -eq 1 ]] || die "Unable to reach the jump host over Bastion after 6 SSH attempts."
 
-  # ---- Rsync bootstrap scripts, log lib, and local chart -------------------
-  log "Syncing bootstrap scripts, lib/log.sh, and chart to jump host ..."
-  rsync -az \
-    -e "ssh ${ssh_base_opts}" \
-    "${ROOT_DIR}/scripts/bootstrap-jump-host.sh" \
-    "${ssh_target}:${canonical_repo_path}/scripts/bootstrap-jump-host.sh"
-  rsync -az \
-    -e "ssh ${ssh_base_opts}" \
-    "${ROOT_DIR}/scripts/bootstrap-k8s.sh" \
-    "${ssh_target}:${canonical_repo_path}/scripts/bootstrap-k8s.sh"
-  rsync -az \
-    -e "ssh ${ssh_base_opts}" \
-    "${ROOT_DIR}/scripts/lib/log.sh" \
-    "${ssh_target}:${canonical_repo_path}/scripts/lib/log.sh"
+  # ---- Sync repo contents to the jump host before remote bootstrap --------
+  log "Syncing repository contents to jump host ..."
   rsync -az --delete \
     -e "ssh ${ssh_base_opts}" \
-    "${ROOT_DIR}/infra/terraform/modules/cluster_bootstrap/charts/anyscale-gateway/" \
-    "${ssh_target}:${canonical_repo_path}/infra/terraform/modules/cluster_bootstrap/charts/anyscale-gateway/"
+    --exclude '.git/' \
+    --exclude '.terraform/' \
+    --exclude '.cache/' \
+    --exclude '.venv/' \
+    --exclude '*.tfstate*' \
+    "${ROOT_DIR}/" \
+    "${ssh_target}:${canonical_repo_path}/"
+
+  if [[ -f "${ROOT_DIR}/.env" ]]; then
+    log "Copying .env to jump host ..."
+    rsync -az \
+      -e "ssh ${ssh_base_opts}" \
+      "${ROOT_DIR}/.env" \
+      "${ssh_target}:${canonical_repo_path}/.env"
+  fi
 
   log "Ensuring jump host operator tooling is present..."
   # shellcheck disable=SC2029
@@ -7266,7 +7458,7 @@ run_anyscale_job_proof() {
   local remote_dir namespace head_pod env_file remote_env_path remote_command job_command job_exit submit_from_workspace submit_working_dir
   local job_wait_timeout_seconds fallback_wait_seconds status_state status_run_count fallback_head_pod fallback_exit
   local job_id job_logs_exit job_log_max_lines job_log_attempt job_log_attempts job_log_retry_delay
-  local proof_env_spec_count
+  local proof_env_spec_count job_submit_attempt job_submit_attempts job_submit_retry_delay
   local fb_gpu_wait_seconds fb_gpu_deadline fb_gpu_worker_pod
   local -a job_cmd auth_env_specs proof_env_specs image_runtime_flags
 
@@ -7312,6 +7504,9 @@ run_anyscale_job_proof() {
       kubectl cp -n "${namespace}" -c ray \
         "${env_file}" \
         "${head_pod}:${remote_env_path}"
+    run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_WORKSPACE_COMMAND_SECONDS}" \
+      kubectl exec -n "${namespace}" -c ray "${head_pod}" -- \
+        bash -lc "source $(shell_join "${remote_env_path}") && cd $(shell_join "${remote_dir}") && $(workspace_anyscale_cli_upgrade_script)" 2>&1 | tee "${jobs_dir}/${job_name}.cli-upgrade.log"
   fi
 
   job_cmd=(
@@ -7348,26 +7543,43 @@ run_anyscale_job_proof() {
     log "Submitting Anyscale job proof ${job_name} on compute config ${compute_config_name} from local Anyscale CLI OAuth context"
   fi
   job_wait_timeout_seconds="${ANYSCALE_JOB_PROOF_WAIT_TIMEOUT_SECONDS:-${WORKLOAD_COMMAND_TIMEOUT_SECONDS}}"
+  job_submit_attempts="${ANYSCALE_JOB_PROOF_SUBMIT_ATTEMPTS:-3}"
+  job_submit_retry_delay="${ANYSCALE_JOB_PROOF_SUBMIT_RETRY_SECONDS:-20}"
+  require_positive_integer_arg "ANYSCALE_JOB_PROOF_SUBMIT_ATTEMPTS" "${job_submit_attempts}"
+  require_positive_integer_arg "ANYSCALE_JOB_PROOF_SUBMIT_RETRY_SECONDS" "${job_submit_retry_delay}"
   job_exit=0
-  set +e
-  if [[ "${submit_from_workspace}" == true ]]; then
-    job_command="$(shell_join "${job_cmd[@]}")"
-    remote_command="$(cat <<EOF
+  for ((job_submit_attempt=1; job_submit_attempt<=job_submit_attempts; job_submit_attempt++)); do
+    if [[ "${job_submit_attempt}" -gt 1 ]]; then
+      log "Retrying Anyscale job proof ${job_name} submission after transient backend error (attempt ${job_submit_attempt}/${job_submit_attempts})"
+      sleep "${job_submit_retry_delay}"
+    fi
+    set +e
+    if [[ "${submit_from_workspace}" == true ]]; then
+      job_command="$(shell_join "${job_cmd[@]}")"
+      remote_command="$(cat <<EOF
 set -euo pipefail
 source $(shell_join "${remote_env_path}")
 cd $(shell_join "${remote_dir}")
 ${job_command}
 EOF
 )"
-    run_with_timeout "${job_wait_timeout_seconds}" \
-      kubectl exec -n "${namespace}" -c ray "${head_pod}" -- \
-        bash -lc "${remote_command}" 2>&1 | tee "${output_log}"
-  else
-    ANYSCALE_HOST="${ANYSCALE_HOST}" run_with_timeout "${job_wait_timeout_seconds}" \
-      "${job_cmd[@]}" 2>&1 | tee "${output_log}"
-  fi
-  job_exit=${PIPESTATUS[0]}
-  set -e
+      run_with_timeout "${job_wait_timeout_seconds}" \
+        kubectl exec -n "${namespace}" -c ray "${head_pod}" -- \
+          bash -lc "${remote_command}" 2>&1 | tee "${output_log}"
+    else
+      ANYSCALE_HOST="${ANYSCALE_HOST}" run_with_timeout "${job_wait_timeout_seconds}" \
+        "${job_cmd[@]}" 2>&1 | tee "${output_log}"
+    fi
+    job_exit=${PIPESTATUS[0]}
+    set -e
+
+    if [[ "${job_exit}" -eq 0 ]] || ! should_retry_anyscale_job_submission "${output_log}" "${job_submit_attempt}"; then
+      break
+    fi
+    if [[ "${job_submit_attempt}" -lt "${job_submit_attempts}" ]]; then
+      : > "${output_log}"
+    fi
+  done
 
   run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS}" \
     "${cli_bin}" job status \
@@ -8002,6 +8214,9 @@ run_anyscale_service_proof() {
       kubectl cp -n "${namespace}" -c ray \
         "${env_file}" \
         "${head_pod}:${remote_env_path}"
+    run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_WORKSPACE_COMMAND_SECONDS}" \
+      kubectl exec -n "${namespace}" -c ray "${head_pod}" -- \
+        bash -lc "source $(shell_join "${remote_env_path}") && cd $(shell_join "${remote_dir}") && $(workspace_anyscale_cli_upgrade_script)" 2>&1 | tee "${services_dir}/${service_name}.cli-upgrade.log"
   fi
 
   deploy_cmd=(
@@ -8562,25 +8777,45 @@ teardown_std_drain() {
 }
 
 teardown_std_terraform_destroy() {
-  local terraform_exit_code=0 ticker_pid start_epoch
+  local terraform_exit_code=0 ticker_pid start_epoch attempt
   local exitcode_file="${SETUP_RUN_DIR}/terraform-destroy.exitcode"
   local resource_group remaining_count rg_exists stage_log
+  local max_attempts="${SETUP_TERRAFORM_DESTROY_RETRY_ATTEMPTS:-3}"
+  local delay_seconds="${SETUP_TERRAFORM_DESTROY_RETRY_DELAY_SECONDS:-30}"
 
   warn "Terraform destroy can run long; Key Vault purge and Azure Firewall deallocation are typical long poles."
-  log "Starting Terraform destroy (timeout ${SETUP_TIMEOUT_TERRAFORM_DESTROY_SECONDS}s)."
+  stage_log="${SETUP_STAGE_LOG_DIR}/$(printf '%02d' "${SETUP_STAGE_INDEX}")-terraform-destroy.log"
 
-  start_epoch="$(date +%s)"
-  _teardown_destroy_progress_ticker "${start_epoch}" &
-  ticker_pid=$!
+  for (( attempt = 1; attempt <= max_attempts; attempt++ )); do
+    log "Starting Terraform destroy (attempt ${attempt}/${max_attempts}, timeout ${SETUP_TIMEOUT_TERRAFORM_DESTROY_SECONDS}s)."
 
-  set +e
-  run_with_timeout "${SETUP_TIMEOUT_TERRAFORM_DESTROY_SECONDS}" \
-    terraform destroy -auto-approve
-  terraform_exit_code=$?
-  set -e
+    start_epoch="$(date +%s)"
+    _teardown_destroy_progress_ticker "${start_epoch}" &
+    ticker_pid=$!
 
-  kill "${ticker_pid}" >/dev/null 2>&1 || true
-  wait "${ticker_pid}" 2>/dev/null || true
+    set +e
+    run_with_timeout "${SETUP_TIMEOUT_TERRAFORM_DESTROY_SECONDS}" \
+      terraform destroy -auto-approve
+    terraform_exit_code=$?
+    set -e
+
+    kill "${ticker_pid}" >/dev/null 2>&1 || true
+    wait "${ticker_pid}" 2>/dev/null || true
+
+    if (( terraform_exit_code == 0 )); then
+      break
+    fi
+
+    if [[ -f "${stage_log}" ]] && grep -Eqi 'AnotherOperationInProgress|Operation.*in progress|RetryableError' "${stage_log}"; then
+      if (( attempt < max_attempts )); then
+        warn "Terraform destroy hit a transient Azure operation-in-progress conflict (attempt ${attempt}/${max_attempts}); retrying in ${delay_seconds}s."
+        sleep "${delay_seconds}"
+        continue
+      fi
+    fi
+
+    break
+  done
 
   printf '%s\n' "${terraform_exit_code}" > "${exitcode_file}"
 
@@ -8590,7 +8825,6 @@ teardown_std_terraform_destroy() {
 
   if (( terraform_exit_code != 0 )); then
     warn "Terraform destroy failed with exit code ${terraform_exit_code}."
-    stage_log="${SETUP_STAGE_LOG_DIR}/$(printf '%02d' "${SETUP_STAGE_INDEX}")-terraform-destroy.log"
     if [[ -f "${stage_log}" ]]; then
       warn "Last 30 lines of ${stage_log}:"
       tail -n 30 "${stage_log}" >&2 || true

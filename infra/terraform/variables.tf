@@ -769,6 +769,46 @@ variable "azure_policy_enabled" {
   default     = true
 }
 
+variable "automatic_upgrade_channel" {
+  description = "AKS automatic upgrade channel for control plane and node pools. 'patch' keeps the cluster current with security patches while preserving stability."
+  type        = string
+  default     = "patch"
+
+  validation {
+    condition     = contains(["patch", "rapid", "node-image", "stable"], var.automatic_upgrade_channel)
+    error_message = "automatic_upgrade_channel must be one of patch, rapid, node-image, or stable."
+  }
+}
+
+variable "node_os_upgrade_channel" {
+  description = "AKS node OS image upgrade channel. SecurityPatch keeps node image security updates moving without waiting for a full release cadence."
+  type        = string
+  default     = "SecurityPatch"
+
+  validation {
+    condition     = contains(["SecurityPatch", "NodeImage", "None"], var.node_os_upgrade_channel)
+    error_message = "node_os_upgrade_channel must be one of SecurityPatch, NodeImage, or None."
+  }
+}
+
+variable "local_account_disabled" {
+  description = "Disable local cluster admin accounts and require Entra-backed access for cluster administration."
+  type        = bool
+  default     = true
+}
+
+variable "defender_enabled" {
+  description = "Enable Microsoft Defender for Containers on the AKS cluster."
+  type        = bool
+  default     = true
+}
+
+variable "key_vault_secrets_provider_enabled" {
+  description = "Enable the AKS Key Vault Secrets Provider add-on for workload secret delivery via CSI."
+  type        = bool
+  default     = true
+}
+
 variable "key_vault_purge_protection_enabled" {
   description = "Enable purge protection on the signing Key Vault. Recommended true for production; default false keeps the sample easy to tear down."
   type        = bool

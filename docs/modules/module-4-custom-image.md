@@ -33,6 +33,17 @@ runtime fails. The fix is to bake the dependency into an image and store it in
 your private ACR, which the AKS kubelet identity pulls over the Private Link
 endpoint. Module 3 deploys that ACR; Module 4 uses it.
 
+This is also a hardening choice. The cluster already denies broad runtime
+freedom with pod-security and namespace isolation controls, so the image path is
+where we make the workload dependency model explicit: package the dependency once
+in a signed, private image and keep the runtime environment predictable.
+
+Because the registry, storage account, and Key Vault are private-only, run the
+custom-image build, SBOM, signing, apply, and proof steps from the Linux jump
+host. A workstation can orchestrate Azure control-plane resources, but it should
+not be expected to resolve private ACR data endpoints or upload Anyscale working
+directories to private storage.
+
 ## Prerequisites
 
 - Module 3 applied and its proofs passing.
