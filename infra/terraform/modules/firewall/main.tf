@@ -206,10 +206,13 @@ resource "azurerm_firewall_policy_rule_collection_group" "aks_egress" {
         }
       }
 
+      # The jump host runs the Anyscale CLI, which reaches the console, API, and
+      # browser-auth hosts the in-cluster operator never touches. Falls back to
+      # anyscale_fqdns when not set so existing configurations keep working.
       rule {
         name              = "jump-host-anyscale"
         source_addresses  = var.jump_host_cidrs
-        destination_fqdns = var.anyscale_fqdns
+        destination_fqdns = length(var.anyscale_jump_host_fqdns) > 0 ? var.anyscale_jump_host_fqdns : var.anyscale_fqdns
         protocols {
           type = "Https"
           port = 443

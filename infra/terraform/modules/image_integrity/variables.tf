@@ -1,3 +1,9 @@
+variable "enabled" {
+  type        = bool
+  default     = true
+  description = "Create the AKS Image Integrity (Ratify + Azure Policy) resources when true. Disable for deployments that do not run the image-signing demo, or when the deploying principal lacks Microsoft.Authorization/policyAssignments/write."
+}
+
 variable "resource_group_name" {
   type = string
 }

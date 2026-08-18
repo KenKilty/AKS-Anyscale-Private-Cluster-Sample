@@ -1,0 +1,94 @@
+###############################################################################
+# Private Link to the Anyscale control plane -- example values.
+#
+# Usage:
+#   cd infra/terraform
+#   cp privatelink.auto.tfvars.example privatelink.auto.tfvars
+#   # edit the alias and zone, then plan/apply as normal
+#
+# Why `.auto.tfvars`: Terraform loads every *.auto.tfvars in the root
+# automatically, so these values apply to direct `terraform plan/apply` AND to
+# runs driven by scripts/anyscale-aks.sh, which does not pass -var-file.
+#
+# The real file is already covered by .gitignore (`*.tfvars`). Keep the alias out
+# of version control.
+#
+# Precedence note: the harness renders terraform.auto.tfvars.json from .env, and
+# *.auto.tfvars files load in lexical order -- "p" before "t", so
+# terraform.auto.tfvars.json WINS on any key set in both. None of the four
+# variables below are rendered by scripts/setup.sh render_tfvars, so there is no
+# conflict today. If you add one of them to .env as TF_VAR_*, the value here
+# still wins, because auto.tfvars outranks environment variables.
+###############################################################################
+
+# Create the private endpoint, private DNS zone, and A records.
+#
+# Leave this false for the first apply if you want the rest of the stack up
+# before introducing the cross-tenant approval dependency.
+enable_privatelink = true
+
+# Alias Anyscale provides for your cloud deployment, in the form
+#   <prefix>.<guid>.<region>.azure.privatelinkservice
+#
+# The region in the alias is where Anyscale's service lives, NOT a constraint on
+# where you deploy. A westus2 alias works from an eastus2 VNet unchanged. Ask for
+# an in-region alias only to cut latency.
+#
+# Cross-tenant, so the connection is manual: Anyscale must approve it. `apply`
+# succeeds with the endpoint Pending, so a green apply proves nothing. Verify
+# from inside the cluster (see the runbook at the bottom of this file).
+anyscale_privatelink_service_alias = "REPLACE-ME.00000000-0000-0000-0000-000000000000.westus2.azure.privatelinkservice"
+
+# Confirm the exact zone with Anyscale -- it differs by environment.
+#   production: azure.anyscale-cloud.dev
+#   predeploy:  azure.anyscale-cloud-predeploy.dev
+#
+# This becomes an Azure private DNS zone linked to THIS VNet, and it is
+# authoritative for the whole domain inside the VNet: any name under it without a
+# record fails to resolve rather than falling back to public DNS.
+anyscale_private_dns_zone_name = "azure.anyscale-cloud.dev"
+
+# Wildcard, because the zone is authoritative for the whole domain inside the
+# VNet. One endpoint serves all three hostname families:
+#   cld-<id>       control plane
+#   grafana-<id>   dashboards
+#   registry-<id>  Ray workload images
+#
+# Replace with ["cld-<id>", "grafana-<id>", "registry-<id>"] to be explicit, but
+# then any hostname you missed stops resolving. A wildcard does not cover the
+# zone apex -- add "@" if you need it.
+anyscale_privatelink_record_names = ["*"]
+
+###############################################################################
+# After apply -- a clean apply is NOT evidence the path works
+#
+# 1. Confirm Anyscale approved the connection (expect "Approved", not "Pending"):
+#
+#      terraform output -json anyscale_privatelink | jq '.connection_state'
+#
+#      az network private-endpoint-connection list \
+#        --id "$(terraform output -json anyscale_privatelink | jq -r '.endpoint_id')" \
+#        -o table
+#
+# 2. Confirm in-VNet resolution returns the endpoint's private IP, from a pod --
+#    not from your workstation, which does not use the VNet resolver:
+#
+#      terraform output -json anyscale_privatelink | jq '.private_ip, .record_fqdns'
+#
+#      kubectl run dnscheck --rm -it --restart=Never --image=busybox:1.36 -- \
+#        nslookup cld-<id>.azure.anyscale-cloud.dev
+#
+#    The answer must be the private_ip above. A public IP means the private zone
+#    is not linked or the hostname is outside it.
+#
+# 3. Confirm which firewall FQDNs this superseded:
+#
+#      terraform output -json anyscale_privatelink | jq '.superseded_firewall_fqdns'
+#
+# Egress still required after this. Private Link carries control-plane traffic
+# only; these stay on the firewall path and have no Private Link option:
+#   Microsoft Entra    workload identity token exchange (no Private Link exists)
+#   MCR                system images
+#   AKS binary mirror  kubelet, containerd, CNI at provisioning
+#   Azure RM           cloud provider, CSI, autoscaler
+###############################################################################

@@ -87,6 +87,12 @@ module "dns_resolver" {
   forwarding_ruleset_vnet_links = {
     workload = local.net_vnet_id
   }
+
+  # The resolver attaches to the VNet, and Azure rejects the attach while the
+  # VNet is mid-update ("Virtual network in NRP is not in the succeeded
+  # provisioning state"). Setting the VNet DNS servers is such an update, so
+  # order behind it the same way routing, bastion, jump_host, and aks do.
+  depends_on = [azurerm_virtual_network_dns_servers.workload]
 }
 
 ###############################################################################
@@ -159,6 +165,28 @@ module "identity" {
 }
 
 ###############################################################################
+# Extra blob-container data-plane grants.
+#
+# module.identity already grants the operator identity Storage Blob Data
+# Contributor on the container this root creates. This covers containers that
+# exist outside Terraform -- e.g. one created by Anyscale cloud onboarding --
+# without renaming or recreating the managed container.
+#
+# The container must already exist; Azure rejects an assignment whose scope does
+# not resolve.
+###############################################################################
+resource "azurerm_role_assignment" "storage_container" {
+  for_each = var.storage_container_role_assignments
+
+  scope                            = "${module.storage.storage_account_id}/blobServices/default/containers/${each.value.container_name}"
+  role_definition_name             = each.value.role_definition_name
+  principal_id                     = coalesce(each.value.principal_id, module.identity.principal_id)
+  principal_type                   = "ServicePrincipal"
+  skip_service_principal_aad_check = true
+  description                      = "Extra container grant '${each.key}' from storage_container_role_assignments."
+}
+
+###############################################################################
 # Azure Firewall — egress lockdown for AKS (Phase 1)
 # Docs: https://learn.microsoft.com/azure/aks/limit-egress-traffic
 #       https://learn.microsoft.com/azure/aks/outbound-rules-control-egress
@@ -177,8 +205,13 @@ module "firewall" {
 
   firewall_subnet_id = local.net_subnet_ids.firewall
 
-  aks_nodes_cidr           = var.subnet_cidrs.aks_nodes
-  anyscale_fqdns           = var.anyscale_fqdns
+  aks_nodes_cidr = var.subnet_cidrs.aks_nodes
+  # Filtered in privatelink.tf: when enable_privatelink is true, FQDNs under the
+  # Anyscale private DNS zone are dropped because they resolve in-VNet and can
+  # never match an outbound firewall rule. Identical to var.anyscale_fqdns
+  # otherwise.
+  anyscale_fqdns           = local.firewall_anyscale_fqdns
+  anyscale_jump_host_fqdns = local.firewall_anyscale_jump_host_fqdns
   azure_identity_fqdns     = var.azure_identity_fqdns
   azure_monitor_fqdns      = var.azure_monitor_fqdns
   container_registry_fqdns = var.container_registry_fqdns
@@ -421,6 +454,8 @@ module "keyvault" {
 module "image_integrity" {
   source = "./modules/image_integrity"
 
+  enabled = var.enable_image_integrity
+
   resource_group_name = local.resource_group_name
   resource_group_id   = local.resource_group_id
   location            = local.resource_group_location
@@ -457,6 +492,8 @@ resource "azurerm_role_assignment" "jump_host_kv_secrets_user" {
 
 # Ratify reads the signing certificate chain to verify signatures.
 resource "azurerm_role_assignment" "ratify_kv_secrets_user" {
+  count = var.enable_image_integrity ? 1 : 0
+
   scope                            = module.keyvault.key_vault_id
   role_definition_name             = "Key Vault Secrets User"
   principal_id                     = module.image_integrity.ratify_principal_id
@@ -466,6 +503,8 @@ resource "azurerm_role_assignment" "ratify_kv_secrets_user" {
 
 # Ratify reads images and Notation signature referrers from the private ACR.
 resource "azurerm_role_assignment" "ratify_acr_pull" {
+  count = var.enable_image_integrity ? 1 : 0
+
   scope                            = module.acr.acr_id
   role_definition_name             = "AcrPull"
   principal_id                     = module.image_integrity.ratify_principal_id
