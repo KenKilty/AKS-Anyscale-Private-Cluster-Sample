@@ -49,8 +49,14 @@ variable "tool_bootstrap_fqdns" {
 }
 
 variable "anyscale_fqdns" {
-  description = "Anyscale control plane / API FQDNs (HTTPS:443) — see https://docs.anyscale.com/networking/overview."
+  description = "Anyscale FQDNs (HTTPS:443) reachable from the AKS node subnet. Keep this to what the in-cluster operator and Ray workloads actually need; everything under the Anyscale private DNS zone should go over Private Link instead. See https://docs.anyscale.com/networking/overview."
   type        = list(string)
+}
+
+variable "anyscale_jump_host_fqdns" {
+  description = "Anyscale FQDNs (HTTPS:443) reachable from the jump-host subnet. Separate from anyscale_fqdns because the operator's needs and the Anyscale CLI's needs differ: the CLI additionally reaches the console, API, and browser-auth hosts. Applied only to jump_host_cidrs."
+  type        = list(string)
+  default     = []
 }
 
 variable "container_registry_fqdns" {

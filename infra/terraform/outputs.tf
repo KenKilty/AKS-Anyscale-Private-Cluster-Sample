@@ -107,7 +107,7 @@ output "image_signing_cert_name" {
 }
 
 output "ratify_client_id" {
-  description = "Client ID of the Ratify workload identity (used by the Ratify Store/KMP CRDs)."
+  description = "Client ID of the Ratify workload identity (used by the Ratify Store/KMP CRDs). Null when enable_image_integrity is false."
   value       = module.image_integrity.ratify_client_id
 }
 

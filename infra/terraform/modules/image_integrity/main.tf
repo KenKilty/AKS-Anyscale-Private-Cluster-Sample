@@ -18,9 +18,13 @@ locals {
   # The AKS Image Integrity preview installs Ratify with this fixed service
   # account in the gatekeeper-system namespace.
   ratify_service_account_subject = "system:serviceaccount:gatekeeper-system:ratify-admin"
+
+  enabled = var.enabled ? 1 : 0
 }
 
 resource "azurerm_user_assigned_identity" "ratify" {
+  count = local.enabled
+
   name                = "id-ratify-${var.name_suffix}"
   resource_group_name = var.resource_group_name
   location            = var.location
@@ -28,8 +32,10 @@ resource "azurerm_user_assigned_identity" "ratify" {
 }
 
 resource "azurerm_federated_identity_credential" "ratify" {
+  count = local.enabled
+
   name                      = "ratify-fic"
-  user_assigned_identity_id = azurerm_user_assigned_identity.ratify.id
+  user_assigned_identity_id = azurerm_user_assigned_identity.ratify[0].id
   audience                  = ["api://AzureADTokenExchange"]
   issuer                    = var.oidc_issuer_url
   subject                   = local.ratify_service_account_subject
@@ -41,6 +47,8 @@ resource "azurerm_federated_identity_credential" "ratify" {
 # group so the policy remediation can enable the feature on the cluster.
 ###############################################################################
 resource "azurerm_resource_group_policy_assignment" "image_integrity" {
+  count = local.enabled
+
   name                 = "image-integrity-${var.name_suffix}"
   resource_group_id    = var.resource_group_id
   policy_definition_id = local.image_integrity_policy_set_definition_id
@@ -53,18 +61,22 @@ resource "azurerm_resource_group_policy_assignment" "image_integrity" {
 }
 
 resource "azurerm_role_assignment" "policy_remediation_contributor" {
+  count = local.enabled
+
   scope                            = var.resource_group_id
   role_definition_name             = "Contributor"
-  principal_id                     = azurerm_resource_group_policy_assignment.image_integrity.identity[0].principal_id
+  principal_id                     = azurerm_resource_group_policy_assignment.image_integrity[0].identity[0].principal_id
   principal_type                   = "ServicePrincipal"
   skip_service_principal_aad_check = true
   description                      = "Lets the Image Integrity policy assignment remediate the cluster to deploy Ratify."
 }
 
 resource "azurerm_resource_group_policy_remediation" "image_integrity" {
+  count = local.enabled
+
   name                           = "remediate-image-integrity-${var.name_suffix}"
   resource_group_id              = var.resource_group_id
-  policy_assignment_id           = azurerm_resource_group_policy_assignment.image_integrity.id
+  policy_assignment_id           = azurerm_resource_group_policy_assignment.image_integrity[0].id
   policy_definition_reference_id = "deployAKSImageIntegrity"
 
   depends_on = [azurerm_role_assignment.policy_remediation_contributor]

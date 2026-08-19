@@ -949,6 +949,171 @@ variable "storage_diagnostic_settings_enabled" {
   default     = null
 }
 
+variable "storage_container_role_assignments" {
+  description = <<-EOT
+    Extra data-plane role assignments on blob containers in the deployed storage
+    account, keyed by an arbitrary name.
+
+    The repository already grants the Anyscale operator identity
+    "Storage Blob Data Contributor" on the container it creates
+    ("<project>-<environment>-blob", via module.identity). Use this for
+    containers that exist outside Terraform -- for example one the Anyscale cloud
+    onboarding created -- without renaming or recreating the managed container.
+
+    principal_id defaults to the Anyscale operator identity's principal ID when
+    omitted, so the common case needs only container_name.
+
+    The container must already exist: Azure rejects a role assignment whose scope
+    does not resolve.
+
+    ex:
+    ```
+    storage_container_role_assignments = {
+      anyscale_data = { container_name = "anyscale-data" }
+    }
+    ```
+  EOT
+  type = map(object({
+    container_name       = string
+    role_definition_name = optional(string, "Storage Blob Data Contributor")
+    principal_id         = optional(string)
+  }))
+  default = {}
+
+  validation {
+    condition = alltrue([
+      for key, assignment in var.storage_container_role_assignments :
+      can(regex("^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$", assignment.container_name))
+    ])
+    error_message = "storage_container_role_assignments container_name must be a valid Azure blob container name (3-63 chars, lowercase letters, numbers, and hyphens; no leading or trailing hyphen)."
+  }
+}
+
+variable "enable_image_integrity" {
+  description = <<-EOT
+    Create the AKS Image Integrity (Ratify + Azure Policy) resources.
+
+    Requires Microsoft.Authorization/policyAssignments/write at the resource-group
+    scope; without it the apply fails with AuthorizationFailed on
+    azurerm_resource_group_policy_assignment. Set false for deployments that do
+    not run the Module 5 image-signing demo.
+
+    Defaults to true to preserve the behavior of earlier revisions.
+  EOT
+  type        = bool
+  default     = true
+}
+
+variable "anyscale_jump_host_fqdns" {
+  description = <<-EOT
+    Anyscale FQDNs the Linux jump host may reach through the firewall on 443.
+
+    Kept separate from anyscale_fqdns because the two callers differ: the
+    in-cluster operator polls only the control plane URL, while the Anyscale CLI
+    on the jump host also reaches the API and browser-auth hosts for login,
+    job submit, and workspace registration.
+
+    Leave empty to fall back to anyscale_fqdns, which is the pre-split behavior.
+  EOT
+  type        = list(string)
+  default     = []
+}
+
+###############################################################################
+# Private Link to the Anyscale control plane
+#
+# Variable names intentionally match
+# terraform-kubernetes-anyscale-foundation-modules/examples/azure/aks-private-cluster
+# so one runbook covers both repositories.
+###############################################################################
+variable "enable_privatelink" {
+  description = <<-EOT
+    Create a private endpoint to the Anyscale control plane instead of reaching
+    it over the internet through Azure Firewall.
+
+    When enabled, privatelink.tf creates a private endpoint against the Anyscale
+    Private Link Service, a private DNS zone, and records so in-VNet workloads
+    resolve the control plane hostname to a private IP.
+
+    This does NOT remove the need for egress. Private Link carries control-plane
+    traffic only; nodes still reach Microsoft Entra (no Private Link exists for
+    it), MCR, the AKS binary mirror, and Azure Resource Manager through the
+    firewall.
+
+    Requires anyscale_privatelink_service_alias and
+    anyscale_privatelink_record_names.
+  EOT
+  type        = bool
+  nullable    = false
+  default     = false
+}
+
+variable "anyscale_privatelink_service_alias" {
+  description = <<-EOT
+    Alias of the Anyscale Private Link Service to connect to. Anyscale provides
+    this per cloud deployment, in the form
+    `<prefix>.<guid>.<region>.azure.privatelinkservice`.
+
+    The alias does not have to be in this cluster's region. A private endpoint
+    must sit in its own VNet's region, but a Private Link Service is reachable
+    from approved private endpoints in any public region. Request an in-region
+    alias only to reduce latency, not for correctness.
+
+    The connection is cross-tenant and therefore MANUAL: the endpoint stays
+    Pending until Anyscale approves it. `terraform apply` succeeds while it is
+    Pending, so a clean apply is not evidence the path works.
+  EOT
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = !var.enable_privatelink || length(var.anyscale_privatelink_service_alias) > 0
+    error_message = "anyscale_privatelink_service_alias must be set when enable_privatelink is true."
+  }
+}
+
+variable "anyscale_private_dns_zone_name" {
+  description = <<-EOT
+    Private DNS zone created for Anyscale control plane resolution. Confirm the
+    exact zone with Anyscale rather than assuming; it differs by environment.
+    Observed: `azure.anyscale-cloud.dev` (production) and
+    `azure.anyscale-cloud-predeploy.dev` (predeploy).
+
+    The zone is authoritative for its whole domain inside this VNet. Once linked,
+    no other name in that domain resolves publicly from inside the VNet. Use the
+    narrowest zone that covers your control plane hostname.
+  EOT
+  type        = string
+  default     = "azure.anyscale-cloud.dev"
+
+  validation {
+    condition     = !var.enable_privatelink || can(regex("^[A-Za-z0-9.-]+$", var.anyscale_private_dns_zone_name))
+    error_message = "anyscale_private_dns_zone_name must be a DNS name containing only letters, numbers, dots, and hyphens."
+  }
+}
+
+variable "anyscale_privatelink_record_names" {
+  description = <<-EOT
+    Records created in the private DNS zone, each without the zone suffix. Every
+    entry becomes an A record pointing at the private endpoint's IP.
+
+    `"*"` creates a wildcard. Because the private zone is authoritative for the
+    whole domain inside the VNet, a name without a record fails to resolve rather
+    than falling back to public DNS, so a wildcard avoids enumerating every
+    hostname the operator uses. One endpoint serves the control plane
+    (`cld-<id>`), Grafana (`grafana-<id>`), and the Ray workload image registry
+    (`registry-<id>`). A wildcard does not cover the zone apex; add `"@"` if you
+    need it.
+  EOT
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = !var.enable_privatelink || length(var.anyscale_privatelink_record_names) > 0
+    error_message = "anyscale_privatelink_record_names must be set when enable_privatelink is true."
+  }
+}
+
 ###############################################################################
 # Tags
 ###############################################################################
