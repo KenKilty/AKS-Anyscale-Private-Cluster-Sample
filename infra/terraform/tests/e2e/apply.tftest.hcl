@@ -2,8 +2,13 @@
 # Full apply test — provisions all Phase 1 resources, asserts shape, then
 # tears everything down automatically (terraform test always destroys).
 #
-# Run with:
-#   terraform test -filter=tests/apply.tftest.hcl -verbose
+# WARNING: This creates real, BILLABLE Azure resources (including an Azure
+# Firewall Standard, billed hourly) and requires explicit authorization before
+# running. It lives under tests/e2e/ so the default `terraform test` never
+# discovers or runs it.
+#
+# Run only with explicit opt-in:
+#   terraform -chdir=infra/terraform test -test-directory=tests/e2e -verbose
 #
 # Cost note: this provisions an Azure Firewall (Standard) which is billed by
 # the hour. GPU pool contract coverage lives in the plan suites so this apply
@@ -13,8 +18,8 @@
 variables {
   project        = "tftest"
   environment    = "ci"
-  azure_location = "westus3"
-  region_short   = "wus3"
+  azure_location = "westus2"
+  region_short   = "wus2"
 
   vnet_address_space = ["10.50.0.0/16"]
   subnet_cidrs = {
@@ -111,7 +116,7 @@ run "phase1_apply" {
   command = apply
 
   assert {
-    condition     = output.resource_group_name == "rg-tftest-ci-wus3"
+    condition     = output.resource_group_name == "rg-tftest-ci-wus2"
     error_message = "Resource group name does not match the CAF naming convention."
   }
 

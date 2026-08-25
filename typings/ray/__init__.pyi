@@ -1,8 +1,13 @@
-# Minimal Ray stub for editor type checking.
-# The proof scripts run in environments where Ray is installed, but this
-# repository doesn't vendor Ray as a local development dependency.
+# Minimal Ray stub for local type checking (pyrightconfig.json stubPath).
+# Covers only the surface used by the proof payloads. Ray is installed in the
+# Anyscale runtime, not in the repo venv.
 
-from typing import Any, Callable, Generic, Sequence, TypeVar, overload
+from collections.abc import Callable, Sequence
+from typing import Any, Generic, TypeVar, overload
+
+from . import data as data
+from . import serve as serve
+from . import train as train
 
 _R = TypeVar("_R")
 _T = TypeVar("_T")
@@ -22,8 +27,8 @@ def remote(
     __function: None = ...,
     /,
     *,
-    num_cpus: int | float | None = ...,
-    num_gpus: int | float | None = ...,
+    num_cpus: float | None = ...,
+    num_gpus: float | None = ...,
     **options: Any,
 ) -> Callable[[Callable[..., _R]], RemoteFunction[_R]]: ...
 

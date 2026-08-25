@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+# Shared Azure CLI environment preparation for Bash scripts in this repository.
+#
+# Purpose: make Azure CLI usable where the calling context leaves HOME unset.
+# Usage:   sourced; do not execute.
+# Inputs:  HOME, AZURE_CONFIG_DIR, ROOT_DIR (all optional).
+# Outputs: exports HOME and AZURE_CONFIG_DIR; creates the config directory,
+#          falling back to .cache/azure-home when HOME cannot be resolved.
 
 ensure_azure_cli_environment() {
   local resolved_home=""

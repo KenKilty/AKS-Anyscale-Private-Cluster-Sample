@@ -45,9 +45,9 @@ locals {
     user_assigned_id      = "id-anyscale-operator-${local.suffix}"
 
     # alphanumeric-only (≤ 24 / ≤ 50 chars). Truncate defensively.
-    storage_account = substr("st${local.suffix_alt}", 0, 24)
-    acr             = substr("cr${local.suffix_alt}", 0, 50)
-    key_vault       = substr("kv-${local.suffix}", 0, 24)
+    storage_account = substr("st${local.suffix_alt}${var.global_name_suffix}", 0, 24)
+    acr             = substr("cr${local.suffix_alt}${var.global_name_suffix}", 0, 50)
+    key_vault       = substr("kv-${local.suffix}${var.global_name_suffix == "" ? "" : "-${var.global_name_suffix}"}", 0, 24)
   }
 
   # Private DNS zones used by private endpoints

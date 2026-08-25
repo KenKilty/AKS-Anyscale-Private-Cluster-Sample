@@ -1,11 +1,22 @@
-variable "resource_group_name" { type = string }
-variable "location" { type = string }
+variable "resource_group_name" {
+  type = string
+}
+
+variable "location" {
+  type = string
+}
+
 variable "tags" {
   type = map(string)
 }
 
-variable "vnet_name" { type = string }
-variable "vnet_address_space" { type = list(string) }
+variable "vnet_name" {
+  type = string
+}
+
+variable "vnet_address_space" {
+  type = list(string)
+}
 
 variable "subnet_cidrs" {
   type = object({
@@ -35,12 +46,19 @@ variable "subnet_names" {
   })
 }
 
-variable "nsg_aks_nodes_name" { type = string }
-variable "nsg_pe_name" { type = string }
+variable "nsg_aks_nodes_name" {
+  type = string
+}
+
+variable "nsg_pe_name" {
+  type = string
+}
+
 variable "nsg_jump_host_name" {
   type    = string
   default = "nsg-jump-host"
 }
+
 variable "nsg_browser_jump_host_name" {
   type    = string
   default = "nsg-browser-jump-host"

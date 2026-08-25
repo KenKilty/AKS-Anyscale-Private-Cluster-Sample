@@ -5,21 +5,23 @@ Run through ``./scripts/anyscale-aks.sh diagnose workspace-artifacts`` so the
 repo virtualenv is used when available.
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
 import subprocess
 import sys
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
-
+from typing import Any
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 TERRAFORM_DIR = ROOT_DIR / "infra" / "terraform"
 DEFAULT_ANYSCALE_HOST = "https://console.azure.anyscale.com"
 
 
-def run_command(command: List[str], *, cwd: Optional[Path] = None) -> str:
+def run_command(command: list[str], *, cwd: Path | None = None) -> str:
     completed = subprocess.run(
         command,
         cwd=str(cwd) if cwd else None,
@@ -54,7 +56,7 @@ def load_anyscale_client():
     return AnyscaleClient
 
 
-def resolve_workspace(client: Any, workspace_id: Optional[str], workspace_name: Optional[str], cloud_name: Optional[str]) -> Any:
+def resolve_workspace(client: Any, workspace_id: str | None, workspace_name: str | None, cloud_name: str | None) -> Any:
     workspace = client.get_workspace(id=workspace_id, name=workspace_name, cloud=cloud_name)
     if workspace is None:
         target = workspace_id or workspace_name or "<unknown>"
@@ -62,7 +64,7 @@ def resolve_workspace(client: Any, workspace_id: Optional[str], workspace_name: 
     return workspace
 
 
-def unwrap_proxied_artifacts_response(response_tuple: Tuple[Any, int, Any]) -> Tuple[Dict[str, Any], int, Dict[str, str]]:
+def unwrap_proxied_artifacts_response(response_tuple: tuple[Any, int, Any]) -> tuple[dict[str, Any], int, dict[str, str]]:
     payload, status_code, headers = response_tuple
     artifact_payload = getattr(payload, "result", payload)
     if hasattr(artifact_payload, "to_dict"):
@@ -76,7 +78,7 @@ def unwrap_proxied_artifacts_response(response_tuple: Tuple[Any, int, Any]) -> T
     return artifact_dict, status_code, normalized_headers
 
 
-def capture_api_exception(exc: Exception) -> Dict[str, Any]:
+def capture_api_exception(exc: Exception) -> dict[str, Any]:
     return {
         "type": exc.__class__.__name__,
         "status_code": getattr(exc, "status", None),
@@ -90,9 +92,9 @@ def capture_api_exception(exc: Exception) -> Dict[str, Any]:
     }
 
 
-def fetch_proxied_artifacts(client: Any, workspace_id: str) -> Dict[str, Any]:
+def fetch_proxied_artifacts(client: Any, workspace_id: str) -> dict[str, Any]:
     try:
-        raw_artifacts = client._internal_api_client.get_workspace_proxied_dataplane_artifacts_api_v2_experimental_workspaces_workspace_id_proxied_dataplane_artifacts_get_with_http_info(  # noqa: SLF001
+        raw_artifacts = client._internal_api_client.get_workspace_proxied_dataplane_artifacts_api_v2_experimental_workspaces_workspace_id_proxied_dataplane_artifacts_get_with_http_info(
             workspace_id
         )
         artifact_dict, artifact_status_code, artifact_headers = unwrap_proxied_artifacts_response(
@@ -105,7 +107,7 @@ def fetch_proxied_artifacts(client: Any, workspace_id: str) -> Dict[str, Any]:
             "summary": summarize_artifacts(artifact_dict),
             "error": None,
         }
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - preserve diagnostics for generated SDK exceptions
         return {
             "status_code": getattr(exc, "status", None),
             "headers": {
@@ -118,7 +120,7 @@ def fetch_proxied_artifacts(client: Any, workspace_id: str) -> Dict[str, Any]:
         }
 
 
-def az_log_analytics_query(workspace_customer_id: str, query: str) -> Dict[str, Any]:
+def az_log_analytics_query(workspace_customer_id: str, query: str) -> dict[str, Any]:
     command = [
         "az",
         "monitor",
@@ -132,7 +134,7 @@ def az_log_analytics_query(workspace_customer_id: str, query: str) -> Dict[str, 
         "json",
         "--only-show-errors",
     ]
-    attempts: List[Dict[str, Any]] = []
+    attempts: list[dict[str, Any]] = []
 
     for attempt in range(1, 4):
         completed = subprocess.run(
@@ -168,7 +170,7 @@ def az_log_analytics_query(workspace_customer_id: str, query: str) -> Dict[str, 
     }
 
 
-def tables_to_rows(payload: Any) -> List[Dict[str, Any]]:
+def tables_to_rows(payload: Any) -> list[dict[str, Any]]:
     if isinstance(payload, list):
         return [row for row in payload if isinstance(row, dict)]
 
@@ -176,7 +178,7 @@ def tables_to_rows(payload: Any) -> List[Dict[str, Any]]:
         return []
 
     tables = payload.get("tables") or []
-    rows: List[Dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
     for table in tables:
         columns = [column["name"] for column in table.get("columns", [])]
         for row in table.get("rows", []):
@@ -212,13 +214,13 @@ def build_detail_query(storage_account_name: str, workspace_id: str, lookback: s
     )
 
 
-def lines_from_text(value: Optional[str]) -> List[str]:
+def lines_from_text(value: str | None) -> list[str]:
     if not value:
         return []
     return [line for line in value.splitlines() if line.strip()]
 
 
-def summarize_artifacts(artifact_dict: Dict[str, Any]) -> Dict[str, Any]:
+def summarize_artifacts(artifact_dict: dict[str, Any]) -> dict[str, Any]:
     requirements_lines = lines_from_text(artifact_dict.get("requirements"))
     env_vars = artifact_dict.get("environment_variables") or []
     return {
@@ -233,10 +235,10 @@ def summarize_artifacts(artifact_dict: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def correlation_summary(detail_rows: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
+def correlation_summary(detail_rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
     total_rows = 0
-    auth_type_counts: Dict[str, int] = {}
-    status_counts: Dict[str, int] = {}
+    auth_type_counts: dict[str, int] = {}
+    status_counts: dict[str, int] = {}
     unique_uris = set()
     unique_ips = set()
 
@@ -321,10 +323,10 @@ def main() -> int:
         cloud_name=args.cloud_name,
     )
 
-    proxied_artifacts = fetch_proxied_artifacts(client, getattr(workspace, "id"))
+    proxied_artifacts = fetch_proxied_artifacts(client, workspace.id)
 
-    summary_query = build_summary_query(storage_account_name, getattr(workspace, "id"), args.lookback)
-    detail_query = build_detail_query(storage_account_name, getattr(workspace, "id"), args.lookback)
+    summary_query = build_summary_query(storage_account_name, workspace.id, args.lookback)
+    detail_query = build_detail_query(storage_account_name, workspace.id, args.lookback)
     summary_result = az_log_analytics_query(workspace_customer_id, summary_query)
     detail_result = az_log_analytics_query(workspace_customer_id, detail_query)
     summary_rows = tables_to_rows(summary_result.get("payload"))

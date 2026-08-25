@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
 # Module 3 — Deploy and prove the lab workload.
 #
-# Thin wrapper that maps the learning-module commands onto the existing
-# implementation in setup.sh / anyscale-aks.sh. Terraform runs from the
-# workstation; jump-host steps run Kubernetes/bootstrap work inside the VNet.
+# Purpose: thin wrapper mapping the learning-module commands onto the shared
+#          implementation in setup.sh / anyscale-aks.sh. No deployment logic
+#          lives here. Terraform runs from the workstation; jump-host steps run
+#          Kubernetes and bootstrap work inside the VNet.
+# Usage:   ./scripts/anyscale-aks.sh module 3 {deploy|verify|proof|browser
+#          validate|teardown|custom-image <action>}
+# Inputs:  the repo-root .env; cached Azure and Anyscale CLI auth.
+# Outputs: delegated command output and staged run artifacts under .cache/;
+#          non-zero exit when a stage fails.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-ROOT_DIR="$(cd "${SCRIPTS_DIR}/.." && pwd)"
 DISPATCHER="${SCRIPTS_DIR}/anyscale-aks.sh"
 MODULE_1_SCRIPT="${SCRIPT_DIR}/module-1-foundation.sh"
 
@@ -37,10 +42,10 @@ module_3_custom_image() {
   local action="${1:-}"
   shift || true
   case "${action}" in
-    prove-failure|preflight|prepare|apply|proof)
+    prove-failure | preflight | prepare | apply | proof)
       dispatch custom-image "${action}" "$@"
       ;;
-    ""|--help|-h)
+    "" | --help | -h)
       cat <<'USAGE'
 Usage: module 3 custom-image {prove-failure|preflight|prepare|apply|proof}
 USAGE
@@ -86,7 +91,8 @@ Usage:
   ./scripts/anyscale-aks.sh module 3 browser validate
   ./scripts/anyscale-aks.sh module 3 teardown
 
-  # Backward-compat alias (prefer 'module 4'):
+  # Custom-image actions also route through module 3. Module 4 is the canonical
+  # path and exposes the full action set, including sign, verify, and sbom.
   ./scripts/anyscale-aks.sh module 3 custom-image {prove-failure|preflight|prepare|apply|proof}
 USAGE
 }
@@ -101,13 +107,14 @@ main() {
     proof) module_3_proof "$@" ;;
     teardown) module_3_teardown "$@" ;;
     browser)
-      local b="${1:-}"; shift || true
+      local b="${1:-}"
+      shift || true
       case "${b}" in
         validate) module_3_browser_validate "$@" ;;
         *) die "Usage: module 3 browser validate" ;;
       esac
       ;;
-    ""|--help|-h) usage ;;
+    "" | --help | -h) usage ;;
     *) die "Unknown 'module 3' subcommand: ${sub}. Run 'module 3 --help'." ;;
   esac
 }

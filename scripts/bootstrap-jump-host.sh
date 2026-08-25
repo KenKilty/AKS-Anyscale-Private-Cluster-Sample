@@ -1,15 +1,24 @@
 #!/usr/bin/env bash
-# bootstrap-jump-host.sh — VM-local setup for the Linux automation jump host.
+# VM-local setup for the Linux jump host.
 #
-# Runs ON the Ubuntu 24.04 jump host (Module 2 bootstrap). Installs the operator
-# toolchain, ensures the repo lives at the canonical path, and creates a repo
-# local .venv with the Anyscale CLI. Idempotent: re-running only fills gaps.
+# Purpose: turn the Ubuntu 24.04 jump host into a repeatable in-VNet operator
+#          workstation. Installs the operator toolchain, ensures the repo lives
+#          at the canonical path, and creates a repo-local .venv with the
+#          Anyscale CLI. Idempotent: re-running only fills gaps.
+# Usage:   ./scripts/bootstrap-jump-host.sh
+#          Refuses to run on anything but Linux. The public route is
+#          `module 2 bootstrap`, whose wrapper adds a second check that it is
+#          not being run on the operator workstation.
+# Inputs:  optional ANYSCALE_AKS_REPO_PATH (default /opt/anyscale-aks-sample)
+#          and ANYSCALE_AKS_REPO_URL (clone source when the path is absent).
+# Outputs: progress logs on stdout; installed tools and the repo-local .venv on
+#          the jump host; non-zero exit when a required install fails.
 #
 # This script never stores tokens. Anyscale auth on the jump host is interactive
-# OAuth — `ANYSCALE_HOST=https://console.azure.anyscale.com anyscale login` — which
-# is sufficient here because the in-VNet jump host reaches private storage directly.
-# `ANYSCALE_CLI_TOKEN` stays empty and is optional, used only for non-interactive
-# in-pod or CI CLI flows.
+# OAuth — `ANYSCALE_HOST=https://console.azure.anyscale.com anyscale login` —
+# which is sufficient because the in-VNet jump host reaches private storage
+# directly. ANYSCALE_CLI_TOKEN stays empty and is optional, used only for
+# non-interactive in-pod or CI CLI flows.
 set -euo pipefail
 
 REPO_PATH="${ANYSCALE_AKS_REPO_PATH:-/opt/anyscale-aks-sample}"
@@ -25,7 +34,10 @@ if [[ -f "$(dirname "${BASH_SOURCE[0]}")/lib/log.sh" ]]; then
 else
   log() { printf '[bootstrap] %s\n' "$*"; }
   warn() { printf '[bootstrap] WARN %s\n' "$*" >&2; }
-  die() { printf '[bootstrap] ERROR %s\n' "$*" >&2; exit 1; }
+  die() {
+    printf '[bootstrap] ERROR %s\n' "$*" >&2
+    exit 1
+  }
 fi
 
 require_linux() {
@@ -84,19 +96,28 @@ install_kubectl() {
 }
 
 install_kubelogin() {
-  have kubelogin && { log "kubelogin present."; return 0; }
+  have kubelogin && {
+    log "kubelogin present."
+    return 0
+  }
   warn "kubelogin not found after kubectl install; attempting az aks install-cli again."
   sudo az aks install-cli --install-location /usr/local/bin/kubectl --kubelogin-install-location /usr/local/bin/kubelogin || true
 }
 
 install_helm() {
-  have helm && { log "Helm present."; return 0; }
+  have helm && {
+    log "Helm present."
+    return 0
+  }
   log "Installing Helm (official script)..."
   curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | sudo bash
 }
 
 install_uv() {
-  have uv && { log "uv present."; return 0; }
+  have uv && {
+    log "uv present."
+    return 0
+  }
   log "Installing uv (Astral installer)..."
   curl -LsSf https://astral.sh/uv/install.sh | sh
   # uv installs to ~/.local/bin, which is only on PATH for interactive login
@@ -110,7 +131,10 @@ install_uv() {
 }
 
 install_podman() {
-  have podman && { log "Podman present."; return 0; }
+  have podman && {
+    log "Podman present."
+    return 0
+  }
   log "Installing Podman via apt..."
   apt_install podman
 }
@@ -211,9 +235,9 @@ ensure_venv() {
     return 0
   fi
   log "Creating repo-local .venv with the Anyscale CLI..."
-  ( cd "${repo}" \
-    && uv venv .venv \
-    && UV_CACHE_DIR="${repo}/.cache/uv-cache" uv pip install --python .venv/bin/python anyscale )
+  (cd "${repo}" &&
+    uv venv .venv &&
+    UV_CACHE_DIR="${repo}/.cache/uv-cache" uv pip install --python .venv/bin/python anyscale)
 }
 
 main() {

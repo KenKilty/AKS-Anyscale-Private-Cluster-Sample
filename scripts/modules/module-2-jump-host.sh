@@ -1,10 +1,20 @@
 #!/usr/bin/env bash
 # Module 2 — Prepare the jump hosts.
 #
-# Turns the Linux VM into a repeatable in-VNet operator workstation and verifies
-# the optional Windows browser VM. Installs tools (bootstrap), syncs the repo and
-# .env to the canonical path, runs execution-mode-aware doctor, and proves the
-# Linux VM can run private deployment commands from inside the VNet.
+# Purpose: turn the Linux VM into a repeatable in-VNet operator workstation and
+#          verify the optional Windows browser VM. Installs tools (bootstrap),
+#          syncs the repo and .env to the canonical path, runs an
+#          execution-mode-aware doctor, and proves the Linux VM can run private
+#          deployment commands from inside the VNet.
+# Usage:   ./scripts/anyscale-aks.sh module 2 {bootstrap|sync|doctor|verify|
+#          browser verify}
+#          sync and browser verify run on the workstation; bootstrap, doctor,
+#          and verify run on the Linux jump host.
+# Inputs:  the repo-root .env; SSH_PRIVATE_KEY_PATH; Terraform outputs for the
+#          jump-host and Bastion names; cached Azure CLI auth.
+# Outputs: progress logs on stdout; a synced repo and .env at
+#          /opt/anyscale-aks-sample with ANYSCALE_EXECUTION_MODE=jump-host;
+#          non-zero exit when a readiness check fails.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -177,7 +187,8 @@ module_2_verify() {
 
   local failures=0
   check_tool() {
-    local name="$1"; shift
+    local name="$1"
+    shift
     if "$@" >/dev/null 2>&1; then
       log "PASS: ${name}"
     else
@@ -244,13 +255,14 @@ main() {
     doctor) module_2_doctor "$@" ;;
     verify) module_2_verify "$@" ;;
     browser)
-      local b="${1:-}"; shift || true
+      local b="${1:-}"
+      shift || true
       case "${b}" in
         verify) module_2_browser_verify "$@" ;;
         *) die "Usage: module 2 browser verify" ;;
       esac
       ;;
-    ""|--help|-h) usage ;;
+    "" | --help | -h) usage ;;
     *) die "Unknown 'module 2' subcommand: ${sub}. Run 'module 2 --help'." ;;
   esac
 }

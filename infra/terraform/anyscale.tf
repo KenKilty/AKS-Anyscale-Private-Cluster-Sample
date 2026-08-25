@@ -6,6 +6,20 @@ locals {
   anyscale_platform_subscription_scope       = "/subscriptions/${var.azure_subscription_id}"
   anyscale_platform_extension_name           = var.anyscale_platform.extension_resource_name
   anyscale_platform_extension_release_train  = contains(["stable", "preview"], lower(var.anyscale_platform.release_train)) ? title(lower(var.anyscale_platform.release_train)) : var.anyscale_platform.release_train
+
+  # Operator (in-cluster) control plane URL vs. local CLI/teardown host.
+  #
+  # global.controlPlaneURL tells the operator which host to reach. With Private
+  # Link enabled that must be the cloud-specific private host
+  # (https://cld-<cloud-resource-id>.<zone>), reachable only from inside the
+  # VNet. The local Anyscale CLI, OAuth login, and the teardown hook keep using
+  # the PUBLIC console host (control_plane_url, default
+  # https://console.azure.anyscale.com). When operator_control_plane_url is
+  # unset the operator falls back to the public host (pre-split behavior).
+  anyscale_platform_operator_control_plane_url = coalesce(
+    var.anyscale_platform.operator_control_plane_url,
+    var.anyscale_platform.control_plane_url,
+  )
   anyscale_platform_destroy_workaround_enabled = coalesce(
     try(var.anyscale_platform.teardown.enabled, null),
     try(var.anyscale_platform.destroy_workaround.enabled, null),
@@ -153,8 +167,10 @@ resource "azapi_resource" "anyscale_platform" {
   }
   body = {
     properties = {
-      mode     = "Incremental"
-      template = jsondecode(file("${path.module}/templates/anyscale-platform-cloud.template.json"))
+      mode = "Incremental"
+      template = jsondecode(templatefile("${path.module}/templates/anyscale-platform-cloud.template.json", {
+        anyscale_platform_arm_api_version = var.anyscale_platform_arm_api_version
+      }))
       parameters = {
         location = {
           value = local.resource_group_location
@@ -244,7 +260,7 @@ resource "azurerm_kubernetes_cluster_extension" "anyscale_operator" {
   configuration_settings = merge(
     {
       "global.cloudDeploymentId"      = azapi_resource.anyscale_platform[0].output.cloud_deployment_id
-      "global.controlPlaneURL"        = var.anyscale_platform.control_plane_url
+      "global.controlPlaneURL"        = local.anyscale_platform_operator_control_plane_url
       "global.auth.iamIdentity"       = module.identity.client_id
       "global.auth.audience"          = var.anyscale_platform.auth_audience
       "workloads.serviceAccount.name" = var.anyscale_operator_serviceaccount
@@ -299,6 +315,7 @@ resource "terraform_data" "anyscale_platform_destroy_workaround" {
     anyscale_cli_token    = var.anyscale_cli_token
     anyscale_cloud_name   = local.anyscale_platform_cloud_control_plane_name
     anyscale_cloud_arm_id = local.anyscale_platform_cloud_arm_id
+    arm_api_version       = var.anyscale_platform_arm_api_version
     azure_subscription_id = var.azure_subscription_id
     timeout_seconds       = local.anyscale_platform_destroy_workaround_runtime_timeout_seconds
     poll_interval_seconds = local.anyscale_platform_destroy_workaround_poll_interval_seconds
@@ -310,11 +327,12 @@ resource "terraform_data" "anyscale_platform_destroy_workaround" {
     command     = "./scripts/lib/anyscale-cloud-teardown.sh --timeout-seconds ${self.input.timeout_seconds} --poll-interval-seconds ${self.input.poll_interval_seconds}"
 
     environment = {
-      ANYSCALE_HOST         = self.input.anyscale_host
-      ANYSCALE_CLI_TOKEN    = self.input.anyscale_cli_token
-      ANYSCALE_CLOUD_NAME   = self.input.anyscale_cloud_name
-      ANYSCALE_CLOUD_ARM_ID = self.input.anyscale_cloud_arm_id
-      AZURE_SUBSCRIPTION_ID = self.input.azure_subscription_id
+      ANYSCALE_HOST                     = self.input.anyscale_host
+      ANYSCALE_CLI_TOKEN                = self.input.anyscale_cli_token
+      ANYSCALE_CLOUD_NAME               = self.input.anyscale_cloud_name
+      ANYSCALE_CLOUD_ARM_ID             = self.input.anyscale_cloud_arm_id
+      ANYSCALE_PLATFORM_ARM_API_VERSION = self.input.arm_api_version
+      AZURE_SUBSCRIPTION_ID             = self.input.azure_subscription_id
     }
   }
 

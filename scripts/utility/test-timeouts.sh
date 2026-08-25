@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
-# Self-test the shared timeout wrapper without touching cloud resources.
-# The public route is: ./scripts/anyscale-aks.sh self-test timeouts.
-# A logged timeout error is expected during the positive timeout checks.
+# Self-test for the shared timeout wrapper.
+#
+# Purpose: prove run_with_timeout returns the command's exit code on success and
+#          124 on timeout, without touching cloud resources.
+# Usage:   ./scripts/anyscale-aks.sh self-test timeouts
+# Inputs:  none.
+# Outputs: per-case results on stdout; non-zero exit on a failed case. A logged
+#          timeout error is expected during the positive timeout checks.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -20,12 +25,12 @@ PASS_COUNT=0
 FAIL_COUNT=0
 
 record_pass() {
-  ((PASS_COUNT+=1))
+  ((PASS_COUNT += 1))
   printf '[PASS] %s\n' "$1"
 }
 
 record_fail() {
-  ((FAIL_COUNT+=1))
+  ((FAIL_COUNT += 1))
   printf "${RED}[FAIL]${NC} %s\n" "$1"
   printf '       %s\n' "$2"
 }
@@ -72,7 +77,7 @@ assert_timeout_window() {
     return 1
   fi
 
-  if (( elapsed_seconds > max_elapsed_seconds )); then
+  if ((elapsed_seconds > max_elapsed_seconds)); then
     record_fail "${label}" "expected <= ${max_elapsed_seconds}s, observed ${elapsed_seconds}s"
     return 1
   fi

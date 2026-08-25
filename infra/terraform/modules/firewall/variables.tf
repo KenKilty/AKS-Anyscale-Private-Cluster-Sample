@@ -42,6 +42,12 @@ variable "jump_host_cidrs" {
   default     = []
 }
 
+variable "browser_jump_host_cidrs" {
+  description = "Source CIDRs for Azure Portal HTTP/HTTPS egress from Windows browser hosts. Empty (default) omits the browser portal application rule collection."
+  type        = list(string)
+  default     = []
+}
+
 variable "tool_bootstrap_fqdns" {
   description = "Operator tool bootstrap egress FQDNs (apt, PyPI, and installer endpoints) reachable from the jump host during first-boot setup. Applied only to jump_host_cidrs."
   type        = list(string)
@@ -49,8 +55,14 @@ variable "tool_bootstrap_fqdns" {
 }
 
 variable "anyscale_fqdns" {
-  description = "Anyscale control plane / API FQDNs (HTTPS:443) — see https://docs.anyscale.com/networking/overview."
+  description = "Anyscale FQDNs (HTTPS:443) reachable from the AKS node subnet. Keep this to what the in-cluster operator and Ray workloads actually need; everything under the Anyscale private DNS zone should go over Private Link instead. See https://docs.anyscale.com/networking/overview."
   type        = list(string)
+}
+
+variable "anyscale_jump_host_fqdns" {
+  description = "Anyscale FQDNs (HTTPS:443) reachable from the jump-host subnet. Separate from anyscale_fqdns because the operator's needs and the Anyscale CLI's needs differ: the CLI additionally reaches the public console, API, and browser-auth hosts. Applied only to jump_host_cidrs. Empty falls back to anyscale_fqdns."
+  type        = list(string)
+  default     = []
 }
 
 variable "container_registry_fqdns" {
@@ -60,6 +72,11 @@ variable "container_registry_fqdns" {
 
 variable "azure_identity_fqdns" {
   description = "Microsoft identity and ARM endpoints permitted for AKS Workload Identity token exchange and Azure SDK/CLI data-plane auth flows."
+  type        = list(string)
+}
+
+variable "azure_portal_fqdns" {
+  description = "Azure Portal authentication and framework FQDNs (HTTP:80 and HTTPS:443) reachable from browser_jump_host_cidrs."
   type        = list(string)
 }
 

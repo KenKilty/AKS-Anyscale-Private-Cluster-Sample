@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+# Shared helpers for submitting Anyscale jobs from the harness.
+#
+# Purpose: keep the in-workspace CLI upgrade snippet and the job-submission
+#          retry policy in one place so every caller retries identically.
+# Usage:   sourced; do not execute.
+# Inputs:  should_retry_anyscale_job_submission <log-file> <attempt>.
+# Outputs: upgrade snippet on stdout; retry helper returns 0 to retry, 1 not to.
 
 workspace_anyscale_cli_upgrade_script() {
   printf '%s

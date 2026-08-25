@@ -11,8 +11,8 @@
 variables {
   project        = "tftest"
   environment    = "ci"
-  azure_location = "westus3"
-  region_short   = "wus3"
+  azure_location = "westus2"
+  region_short   = "wus2"
 
   vnet_address_space = ["10.50.0.0/16"]
   subnet_cidrs = {
@@ -28,6 +28,9 @@ variables {
   }
 
   dns_forwarding_rules = {}
+
+  anyscale_jump_host_fqdns = []
+  enable_browser_host      = false
 
   anyscale_fqdns = [
     "console.anyscale.com",
@@ -105,7 +108,8 @@ variables {
     max_age_in_seconds = 0
   }
 
-  log_analytics_retention_days = 30
+  log_analytics_retention_days                  = 30
+  terraform_managed_diagnostic_settings_enabled = true
   tags = {
     Project     = "tftest"
     Environment = "ci"
@@ -118,17 +122,17 @@ run "naming_and_validate_plan" {
   command = plan
 
   assert {
-    condition     = output.resource_group_name == "rg-tftest-ci-wus3"
+    condition     = output.resource_group_name == "rg-tftest-ci-wus2"
     error_message = "Resource group name does not match the CAF naming convention."
   }
 
   assert {
-    condition     = output.aks_cluster_name == "aks-tftest-ci-wus3"
+    condition     = output.aks_cluster_name == "aks-tftest-ci-wus2"
     error_message = "AKS cluster name does not match the CAF naming convention."
   }
 
   assert {
-    condition     = output.bastion_name == "bas-tftest-ci-wus3"
+    condition     = output.bastion_name == "bas-tftest-ci-wus2"
     error_message = "Bastion name does not match the CAF naming convention."
   }
 
@@ -160,6 +164,11 @@ run "naming_and_validate_plan" {
   assert {
     condition     = output.anyscale_platform_contract.cloud_management_mode == "azapi_arm_template" && output.anyscale_platform_contract.extension_management_mode == "azurerm_kubernetes_cluster_extension" && output.anyscale_platform_contract.extension_type == "Anyscale.AKS.Operator" && output.anyscale_platform_contract.extension_release_namespace == "anyscale-operator" && output.anyscale_platform_contract.extension_service_account_name == "anyscale-operator" && contains(output.anyscale_platform_contract.dynamic_configuration_keys, "global.cloudDeploymentId") && contains(output.anyscale_platform_contract.dynamic_configuration_keys, "networking.gateway.enabled") && output.anyscale_platform_contract.gateway.enabled == "true" && output.anyscale_platform_contract.gateway.name == "anyscale-gateway" && output.anyscale_platform_contract.gateway.class_name == "approuting-istio" && output.anyscale_platform_contract.gateway.namespace == "anyscale-operator" && output.anyscale_platform_contract.gateway.api_version == "gateway.networking.k8s.io/v1" && output.anyscale_platform_contract.gateway.hostname == "10.50.7.251" && output.anyscale_platform_contract.extension_configuration_settings["workloads.accelerator.tolerations.default[0].key"] == "node.anyscale.com/accelerator-type" && output.anyscale_platform_contract.extension_configuration_settings["workloads.accelerator.tolerations.default[1].key"] == "nvidia.com/gpu" && output.anyscale_platform_contract.extension_configuration_settings["workloads.accelerator.tolerations.default[1].operator"] == "Exists" && output.anyscale_platform_contract.lifecycle.create_order[1] == "anyscale_cloud" && output.anyscale_platform_contract.lifecycle.create_order[2] == "cluster_bootstrap" && output.anyscale_platform_contract.lifecycle.destroy_order[0] == "drain_jobs_services_workspaces_and_cluster_sessions" && output.anyscale_platform_contract.lifecycle.destroy_order[1] == "delete_anyscale_cloud" && output.anyscale_platform_contract.teardown.enabled == true && output.anyscale_platform_contract.teardown.mode == "terraform_data_local_exec" && contains(output.anyscale_platform_contract.teardown.runtime_objects, "jobs") && contains(output.anyscale_platform_contract.teardown.runtime_objects, "services") && contains(output.anyscale_platform_contract.teardown.runtime_objects, "workspaces") && contains(output.anyscale_platform_contract.teardown.runtime_objects, "cluster_sessions") && output.anyscale_platform_contract.teardown.cloud_delete_stage == "before_extension_and_aks_destroy"
     error_message = "The Anyscale contract must keep the cloud on the AzAPI ARM path, move the AKS extension to the native azurerm resource, keep the cloud teardown hook, expose the intended lifecycle ordering, and declaratively include the taint-toleration defaults for GPU pools."
+  }
+
+  assert {
+    condition     = output.anyscale_platform_contract.arm_api_version == "2026-08-01-preview"
+    error_message = "The Anyscale ARM deployment and teardown contract must use API version 2026-08-01-preview."
   }
 
   assert {

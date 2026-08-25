@@ -1,188 +1,196 @@
-# Module 1: Build the Foundation
+# Module 1: Foundation
 
-> **Difficulty:** Advanced | **Roles:** Platform Engineer, DevOps Engineer | **Time:** 30–45 min
+## Purpose
 
-By the end of this module, you're able to:
+Create the Azure foundation used by the private AKS deployment: the resource
+group, VNet and subnets, Azure Firewall and route tables, DNS Private Resolver,
+private DNS zones, Azure Bastion, and a private Linux jump host with a
+system-assigned managed identity. The optional Windows browser jump host is a
+private Entra-enabled desktop for browser access through Bastion.
 
-- Create the network and access foundation for a private AKS lab.
-- Stand up the shared network boundary, Azure Bastion, and a Linux automation jump host with a managed identity.
-- Optionally add a private Windows 11 browser jump host with Entra ID login.
-- Select VM sizes that are actually available and in quota for your region.
-
-Once this module completes, your subscription contains a resource group with a private
-VNet, Azure Bastion, Azure Firewall with UDR routing, DNS Private Resolver, a Linux jump
-host with a system-assigned managed identity, and an optional Windows 11 browser jump
-host — all with **no public IPs** on the VMs.
-
-## What You Will Build
-
-- The lab resource group (`rg-<project>-<environment>-<region_short>`).
-- A **shared VNet** with subnets for the jump hosts, Bastion, firewall, DNS
-  resolver, and the future AKS data plane.
-- **Azure Bastion** for SSH (Linux) and portal RDP (Windows) access.
-- A **Linux automation jump host** with a system-assigned managed identity and
-  no public IP.
-- An optional **Windows 11 browser jump host** with the `AADLoginForWindows`
-  extension and no public IP.
-- **Azure Firewall**, route tables, **DNS Private Resolver**, and the private
-  DNS zones the lab uses.
-
-These resources live in `infra/terraform` and are exposed through Terraform
-outputs for the later bootstrap stages.
-
-## Why This Matters
-
-The AKS cluster is private, and the lab needs a stable way to reach it without
-putting every operator laptop on the VNet. Module 1 creates the network,
-Bastion, jump hosts, DNS, routing, and firewall pieces that later stages use.
-
-Keeping the jump hosts **private** (no public IP, Bastion-only access) is the
-core security posture of this lab. The managed identity on the Linux host means
-automation never needs a stored secret. The AKS cluster created in later modules
-uses a hardened default posture as well: local cluster admin accounts are
-disabled, Microsoft Defender for Containers is enabled, and the Key Vault
-Secrets Provider add-on is enabled for workload secret delivery.
+Terraform runs from the workstation and keeps its state in `infra/terraform`.
+Neither jump host has a public IP.
 
 ## Prerequisites
 
-- Azure CLI signed in (`az login`) with rights to create networking, VMs,
-  storage, and role assignments in the target subscription.
-- Azure CLI `ssh` extension installed for Bastion SSH:
-  `az extension add -n ssh`.
-- A populated `.env` (copy `.env-template`) with at least `TF_VAR_project`,
-  `TF_VAR_environment`, `TF_VAR_region_short`, `TF_VAR_azure_location`,
-  `TF_VAR_azure_subscription_id`, and `TF_VAR_azure_tenant_id`.
-- An SSH public key for the Linux jump host
-  (`TF_VAR_linux_jump_host_admin_ssh_public_key`).
+- Complete the account, subscription, provider-registration, permission, and
+  workstation checks in the [lab introduction](intro.md). Use a dedicated test
+  subscription or resource group because later modules create billable resources.
+- The Azure CLI `ssh` extension is installed:
 
-## Exercise 1: Select VM sizes
+  ```bash
+  az extension add -n ssh
+  ```
 
-Terraform should receive concrete VM sizes, not discover them at apply time.
-Run the size selector first:
+- `.env` exists at the repository root and contains the required deployment
+  inputs from `.env-template`.
+- An SSH key pair exists on the workstation. Generate one when needed:
 
-```bash
-./scripts/anyscale-aks.sh module 1 sizes
-```
+  ```bash
+  ssh-keygen -t ed25519 -C "anyscale-aks-operator"
+  ```
 
-This checks regional availability with `az vm list-skus`, picks the first viable
-candidate
-(`Standard_D4s_v5` → `Standard_D4as_v5` → `Standard_D2s_v5` → `Standard_D2as_v5`),
-and writes the result to
-`.cache/aks-anyscale-sample-harness/admin/vm-size-selection.json` plus the
-`TF_VAR_linux_jump_host_vm_size` (and, when the browser host is enabled,
-`TF_VAR_windows_browser_jump_host_vm_size`) variables.
+  Set `TF_VAR_linux_jump_host_admin_ssh_public_key` to the full contents of the
+  generated `.pub` file. Set `SSH_PRIVATE_KEY_PATH` to its matching private key.
+- The target region has quota for the selected Linux jump host VM size and, when
+  enabled, the Windows browser jump host VM size.
+- For the Windows browser jump host, identify the Entra user or group object IDs
+  that receive `Virtual Machine User Login` or `Virtual Machine Administrator
+  Login`. If the Azure portal must retrieve the generated local administrator
+  password from Key Vault, also identify the principals that receive `Key Vault
+  Reader` and `Key Vault Secrets User`.
 
-If no candidate works, the command fails **before** Terraform with the list of
-candidates it checked and the `az` command you can run to inspect or request
-quota.
+> **Warning:** Never place the SSH private key, or any other secret, in `.env`.
+> `.env` holds only the path to the private key.
 
-On success it logs the chosen size (and the browser-host size when enabled):
+## Configuration
 
-```output
-[module1] Selecting Linux automation jump-host VM size in westus3...
-[module1] Selected Linux jump-host VM size: Standard_D4s_v5
-```
+Copy `.env-template` to the ignored repository-root `.env`. Make these decisions
+before the first plan; keep the other supplied defaults for a first run.
 
-## Exercise 2: Plan and apply the foundation
+| Decision | Inputs | First-run guidance |
+| --- | --- | --- |
+| Azure target | `ARM_*`, `TF_VAR_azure_subscription_id`, `TF_VAR_azure_tenant_id` | Keep authentication and target IDs aligned. Confirm the selected subscription with `az account show`. |
+| Naming and region | `TF_VAR_project`, `TF_VAR_environment`, `TF_VAR_azure_location`, `TF_VAR_region_short`, `TF_VAR_tags` | Use short lowercase names and a region where the configured VM families are available. |
+| Network ranges | `TF_VAR_vnet_address_space`, `TF_VAR_subnet_cidrs`, `TF_VAR_service_cidr` | Keep the template ranges unless they overlap a network you must connect to. Changing them requires subnet-capacity review. |
+| Linux access | `TF_VAR_linux_jump_host_admin_ssh_public_key`, `SSH_PRIVATE_KEY_PATH` | Use the public/private key pair prepared above. |
+| Jump-host authorization | `TF_VAR_assign_jump_host_subscription_contributor`, `TF_VAR_jump_host_rbac_scope` | The template grants the Linux jump-host identity both `Contributor` and `Role Based Access Control Administrator` at the configured scope. This is broad. Use a dedicated test subscription, or have an administrator replace it with reviewed scoped roles. |
+| Windows browser access | `TF_VAR_enable_browser_host` and `TF_VAR_browser_host_vm_*_principal_ids` | Leave disabled unless you need interactive access to private browser URLs. If enabled, supply at least one Entra login principal. |
+| Control-plane Private Link | `TF_VAR_enable_privatelink` and the `TF_VAR_anyscale_privatelink_*` inputs | Leave disabled for the core lab. Enabling it requires an alias and DNS zone from Anyscale plus manual endpoint approval. |
 
-### Review what you're about to apply
+The harness exports `TF_VAR_*` directly and does not write a tfvars file. Do not
+commit secrets or use a second `-var-file` input source. The complete input and
+hardening reference is [Configuration Reference](../configuration-reference.md).
 
-The harness renders `infra/terraform/terraform.auto.tfvars.json` from `.env` before every
-apply. The keys that matter for Module 1 are:
+> **Warning:** The template default grants the Linux jump-host identity
+> `Contributor` and `Role Based Access Control Administrator` at the configured
+> scope. That is deliberately broad so the lab workflow succeeds. Use a
+> dedicated test subscription, or have an administrator replace it with reviewed
+> scoped roles before deploying anywhere shared.
 
-- `project`, `environment`, `azure_location`, `region_short` — resource-group naming and region.
-- `linux_jump_host_vm_size` — written by `module 1 sizes`.
-- `windows_browser_jump_host_vm_size` — written by `module 1 sizes` when the browser host is enabled.
-- `linux_jump_host_admin_ssh_public_key` — your public key for Bastion SSH.
+## Procedure
 
-Regenerate and inspect the file at any time with `./scripts/setup.sh render`.
+Run all commands in this section from the workstation.
 
-```bash
-./scripts/anyscale-aks.sh module 1 plan
-./scripts/anyscale-aks.sh module 1 apply
-```
+1. Check the configured jump-host VM sizes:
 
-To also create the optional Windows browser jump host:
+   ```bash
+   ./scripts/anyscale-aks.sh module 1 sizes
+   ```
 
-```bash
-./scripts/anyscale-aks.sh module 1 apply --enable-browser-host
-```
+   When `.env` specifies a VM size, the command verifies that exact size. When
+   the value is empty, it checks `Standard_D4s_v5`, `Standard_D4as_v5`,
+   `Standard_D2s_v5`, and `Standard_D2as_v5` in order. It records the selection
+   in `.cache/aks-anyscale-sample-harness/admin/vm-size-selection.json` and
+   exports the Linux size and, when enabled, the Windows size for the Terraform
+   run.
 
-The apply provisions the network, Bastion, Linux jump host, firewall, DNS
-resolver, and the private DNS zones the lab uses.
+   > **Stop:** If the command reports a restriction or an unavailable SKU,
+   > choose an available size or request quota before continuing.
 
-## Exercise 3: Connect to the jump hosts
+2. Review the Terraform plan:
 
-Open a Bastion SSH session to the Linux automation host:
+   ```bash
+   ./scripts/anyscale-aks.sh module 1 plan
+   ```
 
-```bash
-./scripts/anyscale-aks.sh module 1 connect
-```
+   Include the Windows browser jump host in the plan when required:
 
-If you enabled the Windows browser host, print the Azure portal Bastion RDP path:
+   ```bash
+   ./scripts/anyscale-aks.sh module 1 plan --enable-browser-host
+   ```
 
-```bash
-./scripts/anyscale-aks.sh module 1 browser connect
-```
+   The command validates `.env`, initializes Terraform when needed, and prints
+   the proposed foundation resources. Confirm the subscription, resource-group
+   name, CIDRs, firewall, Bastion, jump hosts, role assignments, and absence of
+   public VM IP addresses.
 
-## Validate Your Work
+   > **Stop:** Do not apply if the plan contains an unexpected replacement,
+   > public endpoint, scope, or region.
+
+3. Apply the reviewed plan:
+
+   ```bash
+   ./scripts/anyscale-aks.sh module 1 apply
+   ```
+
+   To create the Windows browser jump host:
+
+   ```bash
+   ./scripts/anyscale-aks.sh module 1 apply --enable-browser-host
+   ```
+
+   The apply is interactive. Use `--yes` only when the exact reviewed plan is
+   intentionally approved for non-interactive application.
+
+   > **Note:** Azure Firewall, Bastion, private DNS, and VM provisioning can
+   > take several minutes. Do not interrupt Terraform while Azure operations are
+   > progressing. Continue only after Terraform reports `Apply complete`.
+
+4. Open a Bastion SSH session to the Linux jump host when access is required:
+
+   ```bash
+   ./scripts/anyscale-aks.sh module 1 connect
+   ```
+
+5. Print the Azure portal Bastion RDP path for the Windows browser jump host:
+
+   ```bash
+   ./scripts/anyscale-aks.sh module 1 browser connect
+   ```
+
+## Validation
+
+Run the foundation checks from the workstation:
 
 ```bash
 ./scripts/anyscale-aks.sh module 1 verify
 ```
 
-This confirms:
+The command verifies that the Linux jump host exists in Terraform outputs, has
+no public IP, and has an Azure Bastion access path. Private workload DNS targets
+are available only after Module 3 deploys the workload resources.
 
-- The Linux jump host exists in the foundation outputs (the apply completed).
-- The Linux jump host has **no public IP**.
-- A Bastion is present for jump-host access.
-
-It does not open a tunnel; the private DNS resolver targets only resolve from the
-VM after Module 3 deploys the lab workload.
-
-```output
-[module1] PASS: Linux jump host has no public IP.
-[module1] PASS: Bastion 'bas-<project>-<env>-<region>' present for jump-host access.
-```
-
-When the browser host is enabled, also run:
+When the Windows browser jump host is enabled, run:
 
 ```bash
 ./scripts/anyscale-aks.sh module 1 browser verify
 ```
 
-which checks the `AADLoginForWindows` extension, the `Virtual Machine User
-Login` / `Virtual Machine Administrator Login` RBAC assignments, and that the
-Windows VM has no public IP.
+The browser check requires the VM to have no public IP, the
+`AADLoginForWindows` extension state to be `Succeeded`, and at least one
+`Virtual Machine User Login` or `Virtual Machine Administrator Login` role
+assignment.
 
-```output
-[module1] PASS: Windows browser jump host has no public IP.
-[module1] PASS: AADLoginForWindows extension Succeeded.
-[module1] PASS: 1 VM login role assignment(s) present.
-```
+## Adapt the Lab
+
+For supported inputs and implementation ownership, use the
+[Configuration Reference](../configuration-reference.md#modification-points).
+Students should change `.env` inputs, review a new plan, and rerun this module;
+source changes belong in the maintainer workflow.
 
 ## Troubleshooting
 
-- **`module 1 sizes` fails with quota** — the message lists the candidates and
-  the `az vm list-usage` command. Request a quota increase or pass an explicit
-  `TF_VAR_linux_jump_host_vm_size` that you know is available.
-- **Bastion SSH cannot connect** — confirm the apply finished and that the VM has
-  no public IP (that is expected); Bastion is the only path in.
-- **Terraform not initialized** — Module 1 runs `terraform init` in
-  `infra/terraform` for you; if you ran Terraform manually, re-run
-  `module 1 plan`.
+- If `module 1 sizes` reports quota or availability failure, inspect the
+  candidates with the `az vm list-skus` or `az vm list-usage` command printed by
+  the harness. Request quota or set an available VM size in `.env`.
+- If Bastion SSH fails, confirm the apply completed, the matching private key is
+  at `SSH_PRIVATE_KEY_PATH`, and the Azure CLI `ssh` extension is installed. A
+  public IP on the Linux jump host is not expected.
+- If browser verification reports no login role assignment, populate
+  `TF_VAR_browser_host_vm_user_login_principal_ids` or
+  `TF_VAR_browser_host_vm_admin_login_principal_ids` and apply again.
+- If the portal cannot retrieve the Windows browser jump host password from Key
+  Vault, check
+  `TF_VAR_browser_host_admin_password_secret_reader_principal_ids` and the Key
+  Vault network-access inputs.
+- If the Private Link endpoint remains `Pending`, request approval from
+  Anyscale. Reapplying Terraform does not approve a cross-tenant connection.
+- If Terraform is not initialized, rerun `module 1 plan`; the harness initializes
+  `infra/terraform` when required.
 
-## Clean Up Or Continue
+## Next Step
 
-Leave the foundation running — Module 2 and Module 3 depend on it. It is removed
-when you tear down the lab (see [cleanup.md](cleanup.md)).
-
-## Summary
-
-You built the foundation: a private network boundary, Bastion, a Linux
-automation jump host with managed identity, and an optional Windows browser
-host. Module 2 will turn the Linux host into a repeatable operator workstation.
-
-## Next unit
-
-Continue to [Module 2: Prepare the Jump Hosts](module-2-jump-hosts.md).
+Keep the foundation running. Continue to
+[Module 2: Prepare the Jump Hosts](module-2-jump-hosts.md). The foundation is
+removed only through the documented [Clean Up](cleanup.md) procedure.

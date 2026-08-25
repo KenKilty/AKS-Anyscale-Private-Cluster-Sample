@@ -3,14 +3,14 @@
 # and any diagnostic settings.
 ###############################################################################
 resource "azurerm_log_analytics_workspace" "this" {
-  name                       = var.log_analytics_name
-  resource_group_name        = var.resource_group_name
-  location                   = var.location
-  sku                        = "PerGB2018"
-  retention_in_days          = var.retention_in_days
-  internet_ingestion_enabled = var.internet_ingestion_enabled
-  internet_query_enabled     = var.internet_query_enabled
-  tags                       = var.tags
+  name                           = var.log_analytics_name
+  resource_group_name            = var.resource_group_name
+  location                       = var.location
+  sku                            = "PerGB2018"
+  retention_in_days              = var.retention_in_days
+  internet_ingestion_access_type = var.internet_ingestion_enabled ? "Enabled" : "Disabled"
+  internet_query_access_type     = var.internet_query_enabled ? "Enabled" : "Disabled"
+  tags                           = var.tags
 }
 
 ###############################################################################

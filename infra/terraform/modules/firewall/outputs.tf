@@ -35,7 +35,11 @@ output "egress_validation" {
     aks_nodes_cidr              = var.aks_nodes_cidr
     aks_fqdn_tag                = "AzureKubernetesService"
     aks_network_ports           = ["TCP:9000", "UDP:1194"]
+    jump_host_cidrs             = var.jump_host_cidrs
+    browser_jump_host_cidrs     = var.browser_jump_host_cidrs
     azure_identity_fqdns        = var.azure_identity_fqdns
+    azure_portal_fqdns          = var.azure_portal_fqdns
+    azure_portal_protocols      = ["HTTP:80", "HTTPS:443"]
     azure_monitor_fqdns         = var.azure_monitor_fqdns
     anyscale_fqdns              = var.anyscale_fqdns
     container_registry_fqdns    = var.container_registry_fqdns

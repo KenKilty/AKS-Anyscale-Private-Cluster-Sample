@@ -107,7 +107,7 @@ output "image_signing_cert_name" {
 }
 
 output "ratify_client_id" {
-  description = "Client ID of the Ratify workload identity (used by the Ratify Store/KMP CRDs)."
+  description = "Client ID of the Ratify workload identity (used by the Ratify Store/KMP CRDs). Null when enable_image_integrity is false."
   value       = module.image_integrity.ratify_client_id
 }
 
@@ -166,6 +166,59 @@ output "browser_jump_host_private_ip" {
   value       = module.browser_jump_host.private_ip_address
 }
 
+output "browser_jump_host_admin_username" {
+  description = "Local-admin username for the Windows browser host (null when the browser host is disabled)."
+  value       = local.browser_jump_host_admin_username
+}
+
+output "browser_jump_host_admin_password_secret" {
+  description = "Non-secret metadata for the browser-host admin-password fallback secret. The secret value is never exported."
+  value       = local.browser_jump_host_password_secret
+}
+
+output "browser_host_admin_username" {
+  description = "Short-form output for the Windows browser jump-host local-admin username."
+  value       = local.browser_jump_host_admin_username
+}
+
+output "browser_host_admin_password_secret" {
+  description = "Short-form output for the Windows browser jump-host admin-password fallback-secret metadata."
+  value       = local.browser_jump_host_password_secret
+}
+
+###############################################################################
+# Anyscale control plane Private Link (optional, default-off)
+###############################################################################
+output "anyscale_privatelink" {
+  description = <<-EOT
+    Anyscale control plane Private Link state, DNS records, and the firewall
+    FQDNs it supersedes.
+
+    The cross-tenant approval status is deliberately absent: azurerm does not
+    export it on azurerm_private_endpoint, and Terraform would report a stale
+    value if it did. A clean apply is not evidence the path works. Check current
+    status against Azure directly:
+
+      az network private-endpoint show --ids <endpoint_id> \
+        --query "manualPrivateLinkServiceConnections[0].privateLinkServiceConnectionState" \
+        -o json
+
+    record_fqdns lists the private hostnames served by the endpoint. The
+    cloud-specific control plane host cld-<cloud-resource-id>.<zone> is one of
+    them. The PUBLIC browser/OAuth console host console.azure.anyscale.com is a
+    separate domain and is NOT part of this zone.
+  EOT
+  value = {
+    enabled                   = local.privatelink_enabled
+    endpoint_id               = try(azurerm_private_endpoint.anyscale_control_plane[0].id, null)
+    endpoint_name             = try(azurerm_private_endpoint.anyscale_control_plane[0].name, null)
+    private_ip                = try(azurerm_private_endpoint.anyscale_control_plane[0].private_service_connection[0].private_ip_address, null)
+    dns_zone                  = local.privatelink_enabled ? var.anyscale_private_dns_zone_name : null
+    record_fqdns              = local.privatelink_record_fqdns
+    superseded_firewall_fqdns = local.privatelink_superseded_firewall_fqdns
+  }
+}
+
 output "anyscale_userdata_gateway_ip" {
   description = "Gateway internal LB IP that the private userdata wildcard records resolve to."
   value       = local.gateway_internal_lb_ip
@@ -205,6 +258,7 @@ output "anyscale_platform_contract" {
   description = "Plan-time lifecycle contract for the Terraform-managed Anyscale cloud, AKS marketplace extension, and Azure cloud teardown hook."
   value = {
     enabled                          = local.anyscale_platform_enabled
+    arm_api_version                  = var.anyscale_platform_arm_api_version
     cloud_name                       = local.anyscale_platform_cloud_name
     cloud_management_mode            = "azapi_arm_template"
     extension_management_mode        = "azurerm_kubernetes_cluster_extension"
@@ -214,6 +268,7 @@ output "anyscale_platform_contract" {
     extension_service_account_name   = var.anyscale_operator_serviceaccount
     extension_release_train          = local.anyscale_platform_extension_release_train
     control_plane_url                = var.anyscale_platform.control_plane_url
+    operator_control_plane_url       = local.anyscale_platform_operator_control_plane_url
     dynamic_configuration_keys       = local.anyscale_platform_extension_dynamic_configuration_keys
     extension_configuration_settings = local.anyscale_platform_extension_configuration_settings
     gateway                          = local.anyscale_platform_gateway_configuration
@@ -327,6 +382,8 @@ output "private_mode_validation" {
     identity           = module.identity.storage_access
     bastion            = module.bastion.private_aks_access
     kubelogin_access   = module.aks.kubelogin_access
+    network            = module.network.private_mode
+    keyvault           = module.keyvault.private_mode
   }
 }
 

@@ -1,3 +1,4 @@
 {
-  "stubPath": "typings"
+  "stubPath": "typings",
+  "reportMissingModuleSource": "none"
 }

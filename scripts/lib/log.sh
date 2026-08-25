@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Shared logging helpers for Bash scripts in this repository.
-# Callers may set LOG_INFO_PREFIX, LOG_WARN_PREFIX, or LOG_ERROR_PREFIX before
-# sourcing this file to make messages easier to trace.
+#
+# Purpose: give every script one colored log/warn/die surface.
+# Usage:   sourced; do not execute.
+# Inputs:  optional LOG_INFO_PREFIX, LOG_WARN_PREFIX, LOG_ERROR_PREFIX.
+# Outputs: log/warn on stdout, die on stderr; die exits 1.
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'

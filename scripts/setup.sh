@@ -1,12 +1,27 @@
 #!/usr/bin/env bash
-# Compatibility implementation for deploy, verify, proof, and teardown workflows.
-# New workflows should use scripts/anyscale-aks.sh, which delegates here while
-# the larger implementation is split into smaller focused modules.
+# Shared implementation for deploy, verify, proof, and teardown workflows.
+#
+# Purpose: hold the staged deploy pipeline, validation, workload proofs,
+#          custom-image and image-integrity flows, and teardown. Operators
+#          should use scripts/anyscale-aks.sh; this file is the implementation
+#          it routes to.
+# Usage:   ./scripts/setup.sh COMMAND [ARGS]   (internal; run --help for the
+#          command list)
+# Inputs:  the repo-root .env, which must define every Terraform root variable
+#          and is exported as TF_VAR_*; cached Azure and Anyscale CLI auth. No
+#          tfvars file is written or read.
+# Outputs: staged logs and evidence under
+#          .cache/aks-anyscale-sample-harness/runs/<timestamp>-<command>/;
+#          Azure and Anyscale resource changes for mutating commands; non-zero
+#          exit when a stage fails.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="${ROOT_DIR}/.env"
+ENV_TEMPLATE="${ROOT_DIR}/.env-template"
 TERRAFORM_DIR="${ROOT_DIR}/infra/terraform"
+# Reserved tfvars path. render_tfvars removes this file so deployment inputs
+# come solely from .env-exported TF_VAR_* values.
 GENERATED_TFVARS="${TERRAFORM_DIR}/terraform.auto.tfvars.json"
 CACHE_DIR="${ROOT_DIR}/.cache"
 
@@ -84,7 +99,7 @@ write_export_env_script() {
   local output_file="$1"
   shift
 
-  : > "${output_file}"
+  : >"${output_file}"
 
   local env_spec env_name env_value
   for env_spec in "$@"; do
@@ -92,7 +107,7 @@ write_export_env_script() {
     env_name="${env_spec%%=*}"
     env_value="${env_spec#*=}"
     [[ "${env_name}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "Invalid environment variable name '${env_name}'."
-    printf 'export %s=%q\n' "${env_name}" "${env_value}" >> "${output_file}"
+    printf 'export %s=%q\n' "${env_name}" "${env_value}" >>"${output_file}"
   done
 }
 
@@ -110,7 +125,7 @@ set_env_file_var() {
   tmp_file="${CACHE_DIR}/.env.sync.$$"
 
   ENV_LINE_NAME="${name}" ENV_LINE_TEXT="${name}='${escaped_value}'" \
-  awk '
+    awk '
     BEGIN { name = ENVIRON["ENV_LINE_NAME"]; line = ENVIRON["ENV_LINE_TEXT"] }
     index($0, name "=") == 1 { print line; updated = 1; next }
     { print }
@@ -119,7 +134,7 @@ set_env_file_var() {
         print line
       }
     }
-  ' "${ENV_FILE}" > "${tmp_file}"
+  ' "${ENV_FILE}" >"${tmp_file}"
 
   mv "${tmp_file}" "${ENV_FILE}"
 }
@@ -182,8 +197,9 @@ current_azure_principal_object_id() {
       payload="${payload%%.*}"
       payload="${payload//-/+}"
       payload="${payload//_//}"
-      rem=$(( ${#payload} % 4 ))
-      if [[ ${rem} -eq 2 ]]; then payload="${payload}=="
+      rem=$((${#payload} % 4))
+      if [[ ${rem} -eq 2 ]]; then
+        payload="${payload}=="
       elif [[ ${rem} -eq 3 ]]; then payload="${payload}="; fi
       decoded="$(printf '%s' "${payload}" | base64 -d 2>/dev/null || true)"
       if [[ -n "${decoded}" ]]; then
@@ -203,11 +219,11 @@ aks_cluster_exists_for_target() {
 
   run_with_timeout "${SETUP_TIMEOUT_AZURE_COMMAND_SECONDS}" \
     az aks show \
-      --resource-group "${resource_group}" \
-      --name "${cluster_name}" \
-      --query name \
-      --output tsv \
-      --only-show-errors >/dev/null 2>&1
+    --resource-group "${resource_group}" \
+    --name "${cluster_name}" \
+    --query name \
+    --output tsv \
+    --only-show-errors >/dev/null 2>&1
 }
 
 default_anyscale_host() {
@@ -289,6 +305,10 @@ sync_anyscale_cli_env() {
     --output tsv \
     --only-show-errors 2>/dev/null || true)"
 
+  if [[ -z "${live_cloud_deployment_id}" ]]; then
+    live_cloud_deployment_id="$(terraform_output_raw anyscale_cloud_deployment_id 2>/dev/null || true)"
+  fi
+
   if [[ -n "${live_cloud_deployment_id}" && "${live_cloud_deployment_id}" != "${ANYSCALE_CLOUD_DEPLOYMENT_ID:-}" ]]; then
     ANYSCALE_CLOUD_DEPLOYMENT_ID="${live_cloud_deployment_id}"
     export ANYSCALE_CLOUD_DEPLOYMENT_ID
@@ -316,19 +336,28 @@ canonicalize_gpu_pool_configs_json() {
     return 0
   fi
 
-  candidate_json="$(printf '%s' "${raw_value}" \
-    | sed -E 's/([{,])([A-Za-z0-9_]+):/\1"\2":/g' \
-    | sed -E 's/"(name|vm_size|product_name|gpu_count)":([A-Za-z0-9_.-]+)/"\1":"\2"/g')"
+  candidate_json="$(printf '%s' "${raw_value}" |
+    sed -E 's/([{,])([A-Za-z0-9_]+):/\1"\2":/g' |
+    sed -E 's/"(name|vm_size|product_name|gpu_count)":([A-Za-z0-9_.-]+)/"\1":"\2"/g')"
 
   jq -c . <<<"${candidate_json}" 2>/dev/null || return 1
+}
+
+gpu_workloads_enabled() {
+  local canonical_gpu_pool_configs
+
+  [[ -z "${TF_VAR_gpu_pool_configs:-}" ]] && return 1
+  canonical_gpu_pool_configs="$(canonicalize_gpu_pool_configs_json "${TF_VAR_gpu_pool_configs}")" ||
+    die "TF_VAR_gpu_pool_configs must be valid JSON or Terraform-style object syntax."
+  [[ "$(jq 'length' <<<"${canonical_gpu_pool_configs}")" -gt 0 ]]
 }
 
 normalize_gpu_pool_configs_min_count() {
   [[ -n "${TF_VAR_gpu_pool_configs:-}" ]] || return 0
 
   local canonical_gpu_pool_configs normalized_gpu_pool_configs
-  canonical_gpu_pool_configs="$(canonicalize_gpu_pool_configs_json "${TF_VAR_gpu_pool_configs}")" \
-    || die "TF_VAR_gpu_pool_configs must be valid JSON or Terraform-style object syntax."
+  canonical_gpu_pool_configs="$(canonicalize_gpu_pool_configs_json "${TF_VAR_gpu_pool_configs}")" ||
+    die "TF_VAR_gpu_pool_configs must be valid JSON or Terraform-style object syntax."
   normalized_gpu_pool_configs="$(jq -c 'with_entries(.value.min_count |= (if . < 1 then 1 else . end))' <<<"${canonical_gpu_pool_configs}")"
 
   if [[ "${normalized_gpu_pool_configs}" != "${TF_VAR_gpu_pool_configs}" ]]; then
@@ -344,21 +373,19 @@ require_cmd() {
 }
 
 load_env() {
-  local preserve_anyscale_platform=false
-  local anyscale_platform_override=""
   local preserve_anyscale_cli_token="${ANYSCALE_CLI_TOKEN:-}"
-  local preserve_tf_var_anyscale_cli_token="${TF_VAR_anyscale_cli_token:-}"
   local preserve_anyscale_host="${ANYSCALE_HOST:-}"
   local preserve_anyscale_cloud_name="${ANYSCALE_CLOUD_NAME:-}"
   local preserve_anyscale_cloud_deployment_id="${ANYSCALE_CLOUD_DEPLOYMENT_ID:-}"
   local preserved_custom_image_names=()
   local preserved_custom_image_values=()
-  local custom_image_name preserved_index
+  local custom_image_name preserved_index tf_var_name
 
-  if [[ ${TF_VAR_anyscale_platform+x} ]]; then
-    preserve_anyscale_platform=true
-    anyscale_platform_override="${TF_VAR_anyscale_platform}"
-  fi
+  # The repo-root .env is authoritative for every Terraform input. Clear any
+  # inherited TF_VAR_* values so a caller's shell cannot override or augment it.
+  while IFS= read -r tf_var_name; do
+    unset "${tf_var_name}"
+  done < <(compgen -A variable TF_VAR_)
   for custom_image_name in \
     ANYSCALE_CUSTOM_IMAGE_ENABLED \
     ANYSCALE_CUSTOM_IMAGE_REPOSITORY \
@@ -381,12 +408,6 @@ load_env() {
   set +a
   set -u
 
-  # Preserve the phase-scoped platform override after sourcing .env so callers
-  # can temporarily disable or enable the Anyscale platform layer per deploy phase.
-  if [[ "${preserve_anyscale_platform}" == true ]]; then
-    TF_VAR_anyscale_platform="${anyscale_platform_override}"
-    export TF_VAR_anyscale_platform
-  fi
   for preserved_index in "${!preserved_custom_image_names[@]}"; do
     printf -v "${preserved_custom_image_names[${preserved_index}]}" '%s' "${preserved_custom_image_values[${preserved_index}]}"
     export "${preserved_custom_image_names[${preserved_index}]}"
@@ -402,12 +423,6 @@ load_env() {
     export ANYSCALE_CLI_TOKEN
   elif [[ -z "${ANYSCALE_CLI_TOKEN:-}" ]]; then
     unset ANYSCALE_CLI_TOKEN
-  fi
-  if [[ -n "${preserve_tf_var_anyscale_cli_token}" ]]; then
-    TF_VAR_anyscale_cli_token="${preserve_tf_var_anyscale_cli_token}"
-    export TF_VAR_anyscale_cli_token
-  elif [[ -z "${TF_VAR_anyscale_cli_token:-}" ]]; then
-    unset TF_VAR_anyscale_cli_token
   fi
   if [[ -n "${preserve_anyscale_host}" ]]; then
     ANYSCALE_HOST="${preserve_anyscale_host}"
@@ -448,55 +463,121 @@ require_env_var() {
   [[ -n "${!name:-}" ]] || die "Missing required environment variable ${name} in ${ENV_FILE}."
 }
 
-apply_lab_tfvar_defaults() {
-  [[ -n "${TF_VAR_assign_current_principal_cluster_access:-}" ]] || TF_VAR_assign_current_principal_cluster_access="true"
-  [[ -n "${TF_VAR_aks_cluster_admin_principal_ids:-}" ]] || TF_VAR_aks_cluster_admin_principal_ids="{}"
-  [[ -n "${TF_VAR_aks_cluster_user_principal_ids:-}" ]] || TF_VAR_aks_cluster_user_principal_ids="{}"
-  [[ -n "${TF_VAR_linux_jump_host_vm_size:-}" ]] || TF_VAR_linux_jump_host_vm_size="Standard_D4s_v5"
-  [[ -n "${TF_VAR_linux_jump_host_admin_username:-}" ]] || TF_VAR_linux_jump_host_admin_username="azureoperator"
-  if [[ -z "${TF_VAR_linux_jump_host_admin_ssh_public_key:-}" ]]; then
-    local ssh_public_key_path="${SSH_PRIVATE_KEY_PATH:-${HOME}/.ssh/id_ed25519}.pub"
-    [[ -f "${ssh_public_key_path}" ]] || die "Missing TF_VAR_linux_jump_host_admin_ssh_public_key and SSH public key ${ssh_public_key_path}."
-    TF_VAR_linux_jump_host_admin_ssh_public_key="$(<"${ssh_public_key_path}")"
-  fi
-  [[ -n "${TF_VAR_enable_browser_host:-}" ]] || TF_VAR_enable_browser_host="false"
-  [[ -n "${TF_VAR_windows_browser_jump_host_vm_size:-}" ]] || TF_VAR_windows_browser_jump_host_vm_size="Standard_D4s_v5"
-  [[ -n "${TF_VAR_windows_browser_jump_host_admin_username:-}" ]] || TF_VAR_windows_browser_jump_host_admin_username="azureadmin"
-  [[ -n "${TF_VAR_windows_browser_jump_host_admin_password:-}" ]] || TF_VAR_windows_browser_jump_host_admin_password=""
-  [[ -n "${TF_VAR_browser_host_vm_user_login_principal_ids:-}" ]] || TF_VAR_browser_host_vm_user_login_principal_ids="{}"
-  [[ -n "${TF_VAR_browser_host_vm_admin_login_principal_ids:-}" ]] || TF_VAR_browser_host_vm_admin_login_principal_ids="{}"
-  [[ -n "${TF_VAR_assign_jump_host_subscription_contributor:-}" ]] || TF_VAR_assign_jump_host_subscription_contributor="true"
-  [[ -n "${TF_VAR_jump_host_rbac_scope:-}" ]] || TF_VAR_jump_host_rbac_scope=""
-  [[ -n "${TF_VAR_linux_jump_host_custom_data:-}" ]] || TF_VAR_linux_jump_host_custom_data=""
-
-  # Backfill the jump-host subnet CIDRs for older .env files created before the
-  # single-root merge added them to subnet_cidrs. Only fills keys that are absent;
-  # values match the .env-template defaults.
-  if [[ -n "${TF_VAR_subnet_cidrs:-}" ]]; then
-    TF_VAR_subnet_cidrs="$(jq -c \
-      '(.jump_host //= "10.50.3.0/27") | (.browser_jump_host //= "10.50.3.32/27")' \
-      <<<"${TF_VAR_subnet_cidrs}")"
-    export TF_VAR_subnet_cidrs
-  fi
-
-  export TF_VAR_assign_current_principal_cluster_access \
-    TF_VAR_aks_cluster_admin_principal_ids \
-    TF_VAR_aks_cluster_user_principal_ids \
-    TF_VAR_enable_browser_host \
-    TF_VAR_windows_browser_jump_host_vm_size \
-    TF_VAR_windows_browser_jump_host_admin_username \
-    TF_VAR_windows_browser_jump_host_admin_password \
-    TF_VAR_browser_host_vm_user_login_principal_ids \
-    TF_VAR_browser_host_vm_admin_login_principal_ids \
-    TF_VAR_assign_jump_host_subscription_contributor \
-    TF_VAR_jump_host_rbac_scope \
-    TF_VAR_linux_jump_host_custom_data
-}
-
 render_tfvars() {
   load_env
 
-  local required_env_vars=(
+  # Deployment inputs come only from the repo-root .env, exported as TF_VAR_*
+  # into this process by load_env below. No tfvars file is written; remove the
+  # reserved generated artifact so Terraform never reads deployment values from
+  # disk.
+  rm -f "${GENERATED_TFVARS}"
+
+  # .env is authoritative: every Terraform root variable must be defined here
+  # (copy new keys from .env-template). This list mirrors the variable blocks in
+  # infra/terraform/variables.tf, which carry no root defaults. A value may be
+  # empty where the variable is optional, but the key must be present so no
+  # hidden Terraform default applies.
+  local all_root_tfvars=(
+    TF_VAR_acr_push_principal_ids
+    TF_VAR_acr_zone_redundancy_enabled
+    TF_VAR_aks_cluster_admin_principal_ids
+    TF_VAR_aks_cluster_user_principal_ids
+    TF_VAR_aks_sku_tier
+    TF_VAR_ampls_enabled
+    TF_VAR_ampls_ingestion_access_mode
+    TF_VAR_ampls_query_access_mode
+    TF_VAR_anyscale_cli_token
+    TF_VAR_anyscale_fqdns
+    TF_VAR_anyscale_jump_host_fqdns
+    TF_VAR_anyscale_operator_identity
+    TF_VAR_anyscale_operator_namespace
+    TF_VAR_anyscale_operator_serviceaccount
+    TF_VAR_anyscale_platform
+    TF_VAR_anyscale_platform_admin_role_assignments
+    TF_VAR_anyscale_platform_arm_api_version
+    TF_VAR_anyscale_platform_default_admin_assignment
+    TF_VAR_anyscale_platform_role_assignments
+    TF_VAR_anyscale_private_dns_zone_name
+    TF_VAR_anyscale_privatelink_record_names
+    TF_VAR_anyscale_privatelink_service_alias
+    TF_VAR_assign_current_principal_cluster_access
+    TF_VAR_assign_jump_host_subscription_contributor
+    TF_VAR_automatic_upgrade_channel
+    TF_VAR_availability_zones
+    TF_VAR_azure_identity_fqdns
+    TF_VAR_azure_location
+    TF_VAR_azure_monitor_fqdns
+    TF_VAR_azure_policy_enabled
+    TF_VAR_azure_portal_fqdns
+    TF_VAR_azure_subscription_id
+    TF_VAR_azure_tenant_id
+    TF_VAR_bootstrap_k8s
+    TF_VAR_browser_host_admin_password_secret_name
+    TF_VAR_browser_host_admin_password_secret_reader_principal_ids
+    TF_VAR_browser_host_vm_admin_login_principal_ids
+    TF_VAR_browser_host_vm_user_login_principal_ids
+    TF_VAR_container_insights_data_collection_interval
+    TF_VAR_container_insights_namespace_filtering_mode
+    TF_VAR_container_insights_namespaces
+    TF_VAR_container_insights_streams
+    TF_VAR_container_insights_v2_enabled
+    TF_VAR_container_registry_fqdns
+    TF_VAR_cpu_vm_size
+    TF_VAR_defender_enabled
+    TF_VAR_dns_forwarding_rules
+    TF_VAR_dns_service_ip
+    TF_VAR_enable_browser_host
+    TF_VAR_enable_image_integrity
+    TF_VAR_enable_privatelink
+    TF_VAR_environment
+    TF_VAR_global_name_suffix
+    TF_VAR_gpu_pool_configs
+    TF_VAR_image_signing_cert_name
+    TF_VAR_jump_host_rbac_scope
+    TF_VAR_key_vault_public_access_cidrs_csv
+    TF_VAR_key_vault_public_network_access_enabled
+    TF_VAR_key_vault_purge_protection_enabled
+    TF_VAR_key_vault_secrets_provider_enabled
+    TF_VAR_key_vault_soft_delete_retention_days
+    TF_VAR_kubernetes_version
+    TF_VAR_linux_jump_host_admin_ssh_public_key
+    TF_VAR_linux_jump_host_admin_username
+    TF_VAR_linux_jump_host_custom_data
+    TF_VAR_linux_jump_host_vm_size
+    TF_VAR_local_account_disabled
+    TF_VAR_log_analytics_internet_ingestion_enabled
+    TF_VAR_log_analytics_internet_query_enabled
+    TF_VAR_log_analytics_retention_days
+    TF_VAR_node_os_upgrade_channel
+    TF_VAR_project
+    TF_VAR_region_short
+    TF_VAR_service_cidr
+    TF_VAR_storage_cors_rule
+    TF_VAR_storage_diagnostic_settings_enabled
+    TF_VAR_storage_replication_type
+    TF_VAR_subnet_cidrs
+    TF_VAR_system_node_pool_max_count
+    TF_VAR_system_node_pool_min_count
+    TF_VAR_system_vm_size
+    TF_VAR_tags
+    TF_VAR_terraform_managed_diagnostic_settings_enabled
+    TF_VAR_tool_bootstrap_fqdns
+    TF_VAR_vnet_address_space
+    TF_VAR_windows_browser_jump_host_admin_password
+    TF_VAR_windows_browser_jump_host_admin_username
+    TF_VAR_windows_browser_jump_host_vm_size
+  )
+
+  local env_name
+  for env_name in "${all_root_tfvars[@]}"; do
+    if ! declare -p "${env_name}" >/dev/null 2>&1; then
+      die "Missing required deployment key ${env_name} in ${ENV_FILE}. Copy any new keys from .env-template; .env must define every Terraform root variable."
+    fi
+  done
+
+  # A subset must also be non-empty: identity, sizing, and networking essentials
+  # that have no safe empty value.
+  local required_nonempty=(
     TF_VAR_azure_subscription_id
     TF_VAR_azure_tenant_id
     TF_VAR_project
@@ -506,6 +587,7 @@ render_tfvars() {
     TF_VAR_aks_sku_tier
     TF_VAR_system_vm_size
     TF_VAR_cpu_vm_size
+    TF_VAR_linux_jump_host_admin_ssh_public_key
     TF_VAR_service_cidr
     TF_VAR_dns_service_ip
     TF_VAR_anyscale_operator_namespace
@@ -540,24 +622,18 @@ render_tfvars() {
     TF_VAR_terraform_managed_diagnostic_settings_enabled
     TF_VAR_tags
   )
-
-  # tool_bootstrap_fqdns is intentionally not in the rendered set. Like the
-  # composite anyscale_platform/bootstrap_k8s overrides, it is applied through an
-  # exported TF_VAR_ env var when set; its default lives in
-  # infra/terraform/variables.tf and matches scripts/bootstrap-jump-host.sh.
-  local env_name
-  for env_name in "${required_env_vars[@]}"; do
+  for env_name in "${required_nonempty[@]}"; do
     require_env_var "${env_name}"
   done
 
-  # Avoid `${VAR:-{}}` for an empty-object default: when VAR is already set to
-  # `{}`, bash's brace-matching rewrites the expansion as `{}}` and breaks jq.
-  [[ -n "${TF_VAR_anyscale_platform_admin_role_assignments:-}" ]] \
-    || TF_VAR_anyscale_platform_admin_role_assignments="{}"
-  [[ -n "${TF_VAR_anyscale_platform_default_admin_assignment:-}" ]] \
-    || TF_VAR_anyscale_platform_default_admin_assignment='{"enabled":true,"principal_type":"User","role_definition_name":"Anyscale Platform Administrator","scope":"subscription"}'
-  [[ -n "${TF_VAR_anyscale_platform_role_assignments:-}" ]] \
-    || TF_VAR_anyscale_platform_role_assignments="{}"
+  # Supply the standard jump-host subnet CIDRs when those nested keys are unset.
+  # This never supplies an omitted root variable.
+  if [[ -n "${TF_VAR_subnet_cidrs:-}" ]]; then
+    TF_VAR_subnet_cidrs="$(jq -c \
+      '(.jump_host //= "10.50.3.0/27") | (.browser_jump_host //= "10.50.3.32/27")' \
+      <<<"${TF_VAR_subnet_cidrs}")"
+    export TF_VAR_subnet_cidrs
+  fi
 
   export TF_VAR_anyscale_platform_default_admin_assignment
   export TF_VAR_anyscale_platform_role_assignments
@@ -565,12 +641,6 @@ render_tfvars() {
 
   normalize_gpu_pool_configs_min_count
   sync_anyscale_cli_env
-  apply_lab_tfvar_defaults
-
-  if [[ -z "${TF_VAR_anyscale_cli_token:-}" && -n "${ANYSCALE_CLI_TOKEN:-}" ]]; then
-    TF_VAR_anyscale_cli_token="${ANYSCALE_CLI_TOKEN}"
-    export TF_VAR_anyscale_cli_token
-  fi
 
   jq -n \
     --arg azure_subscription_id "${TF_VAR_azure_subscription_id}" \
@@ -579,6 +649,7 @@ render_tfvars() {
     --arg environment "${TF_VAR_environment}" \
     --arg azure_location "${TF_VAR_azure_location}" \
     --arg region_short "${TF_VAR_region_short}" \
+    --arg global_name_suffix "${TF_VAR_global_name_suffix}" \
     --arg aks_sku_tier "${TF_VAR_aks_sku_tier}" \
     --arg system_vm_size "${TF_VAR_system_vm_size}" \
     --arg cpu_vm_size "${TF_VAR_cpu_vm_size}" \
@@ -603,7 +674,7 @@ render_tfvars() {
     --argjson system_node_pool_min_count "${TF_VAR_system_node_pool_min_count}" \
     --argjson system_node_pool_max_count "${TF_VAR_system_node_pool_max_count}" \
     --argjson gpu_pool_configs "${TF_VAR_gpu_pool_configs}" \
-    --argjson kubernetes_version "${TF_VAR_kubernetes_version}" \
+    --arg kubernetes_version "${TF_VAR_kubernetes_version}" \
     --argjson storage_cors_rule "${TF_VAR_storage_cors_rule}" \
     --argjson acr_zone_redundancy_enabled "${TF_VAR_acr_zone_redundancy_enabled}" \
     --argjson log_analytics_retention_days "${TF_VAR_log_analytics_retention_days}" \
@@ -621,11 +692,21 @@ render_tfvars() {
     --argjson enable_browser_host "${TF_VAR_enable_browser_host}" \
     --arg windows_browser_jump_host_vm_size "${TF_VAR_windows_browser_jump_host_vm_size}" \
     --arg windows_browser_jump_host_admin_username "${TF_VAR_windows_browser_jump_host_admin_username}" \
-    --arg windows_browser_jump_host_admin_password "${TF_VAR_windows_browser_jump_host_admin_password}" \
     --argjson browser_host_vm_user_login_principal_ids "${TF_VAR_browser_host_vm_user_login_principal_ids}" \
     --argjson browser_host_vm_admin_login_principal_ids "${TF_VAR_browser_host_vm_admin_login_principal_ids}" \
+    --arg browser_host_admin_password_secret_name "${TF_VAR_browser_host_admin_password_secret_name}" \
+    --argjson browser_host_admin_password_secret_reader_principal_ids "${TF_VAR_browser_host_admin_password_secret_reader_principal_ids}" \
+    --argjson key_vault_public_network_access_enabled "${TF_VAR_key_vault_public_network_access_enabled}" \
+    --arg key_vault_public_access_cidrs_csv "${TF_VAR_key_vault_public_access_cidrs_csv}" \
     --argjson assign_jump_host_subscription_contributor "${TF_VAR_assign_jump_host_subscription_contributor}" \
     --arg jump_host_rbac_scope "${TF_VAR_jump_host_rbac_scope}" \
+    --argjson anyscale_jump_host_fqdns "${TF_VAR_anyscale_jump_host_fqdns}" \
+    --argjson enable_privatelink "${TF_VAR_enable_privatelink}" \
+    --arg anyscale_privatelink_service_alias "${TF_VAR_anyscale_privatelink_service_alias}" \
+    --arg anyscale_private_dns_zone_name "${TF_VAR_anyscale_private_dns_zone_name}" \
+    --argjson anyscale_privatelink_record_names "${TF_VAR_anyscale_privatelink_record_names}" \
+    --argjson enable_image_integrity "${TF_VAR_enable_image_integrity}" \
+    --argjson anyscale_platform "${TF_VAR_anyscale_platform}" \
     --argjson anyscale_platform_default_admin_assignment "${TF_VAR_anyscale_platform_default_admin_assignment}" \
     --argjson anyscale_platform_role_assignments "${TF_VAR_anyscale_platform_role_assignments}" \
     --argjson anyscale_platform_admin_role_assignments "${TF_VAR_anyscale_platform_admin_role_assignments}" \
@@ -634,6 +715,7 @@ render_tfvars() {
     --argjson assign_current_principal_cluster_access "${TF_VAR_assign_current_principal_cluster_access}" \
     --argjson aks_cluster_admin_principal_ids "${TF_VAR_aks_cluster_admin_principal_ids}" \
     --argjson aks_cluster_user_principal_ids "${TF_VAR_aks_cluster_user_principal_ids}" \
+    --argjson acr_push_principal_ids "${TF_VAR_acr_push_principal_ids}" \
     '{
       azure_subscription_id: $azure_subscription_id,
       azure_tenant_id: $azure_tenant_id,
@@ -641,6 +723,7 @@ render_tfvars() {
       environment: $environment,
       azure_location: $azure_location,
       region_short: $region_short,
+      global_name_suffix: $global_name_suffix,
       aks_sku_tier: $aks_sku_tier,
       system_vm_size: $system_vm_size,
       cpu_vm_size: $cpu_vm_size,
@@ -683,11 +766,21 @@ render_tfvars() {
       enable_browser_host: $enable_browser_host,
       windows_browser_jump_host_vm_size: $windows_browser_jump_host_vm_size,
       windows_browser_jump_host_admin_username: $windows_browser_jump_host_admin_username,
-      windows_browser_jump_host_admin_password: $windows_browser_jump_host_admin_password,
       browser_host_vm_user_login_principal_ids: $browser_host_vm_user_login_principal_ids,
       browser_host_vm_admin_login_principal_ids: $browser_host_vm_admin_login_principal_ids,
+      browser_host_admin_password_secret_name: $browser_host_admin_password_secret_name,
+      browser_host_admin_password_secret_reader_principal_ids: $browser_host_admin_password_secret_reader_principal_ids,
+      key_vault_public_network_access_enabled: $key_vault_public_network_access_enabled,
+      key_vault_public_access_cidrs_csv: $key_vault_public_access_cidrs_csv,
       assign_jump_host_subscription_contributor: $assign_jump_host_subscription_contributor,
       jump_host_rbac_scope: $jump_host_rbac_scope,
+      anyscale_jump_host_fqdns: $anyscale_jump_host_fqdns,
+      enable_privatelink: $enable_privatelink,
+      anyscale_privatelink_service_alias: $anyscale_privatelink_service_alias,
+      anyscale_private_dns_zone_name: $anyscale_private_dns_zone_name,
+      anyscale_privatelink_record_names: $anyscale_privatelink_record_names,
+      enable_image_integrity: $enable_image_integrity,
+      anyscale_platform: $anyscale_platform,
       anyscale_platform_default_admin_assignment: $anyscale_platform_default_admin_assignment,
       anyscale_platform_role_assignments: $anyscale_platform_role_assignments,
       anyscale_platform_admin_role_assignments: $anyscale_platform_admin_role_assignments,
@@ -695,10 +788,11 @@ render_tfvars() {
       anyscale_cli_token: (if $anyscale_cli_token == "" then null else $anyscale_cli_token end),
       assign_current_principal_cluster_access: $assign_current_principal_cluster_access,
       aks_cluster_admin_principal_ids: $aks_cluster_admin_principal_ids,
-      aks_cluster_user_principal_ids: $aks_cluster_user_principal_ids
-    }' > "${GENERATED_TFVARS}"
+      aks_cluster_user_principal_ids: $aks_cluster_user_principal_ids,
+      acr_push_principal_ids: $acr_push_principal_ids
+    }' >/dev/null
 
-  log "Rendered ${GENERATED_TFVARS}"
+  log "Validated deployment TF_VAR_* inputs from ${ENV_FILE}"
 }
 
 terraform_output_raw() {
@@ -776,7 +870,7 @@ ensure_anyscale_marketplace_agreement_accepted() {
     printf 'Accept the Anyscale marketplace agreement? [y/N]: '
     IFS= read -r prompt_response || die "Marketplace agreement is required for the Anyscale operator AKS extension."
     case "${prompt_response}" in
-      y|Y|yes|YES|Yes) ;;
+      y | Y | yes | YES | Yes) ;;
       *) die "Marketplace agreement not accepted; cannot install the Anyscale operator AKS extension. Re-run when ready to accept." ;;
     esac
   fi
@@ -1017,7 +1111,7 @@ terraform_state_backup_path() {
 pid_from_file() {
   local pid_file="$1"
   [[ -f "${pid_file}" ]] || return 0
-  tr -d '[:space:]' < "${pid_file}"
+  tr -d '[:space:]' <"${pid_file}"
 }
 
 pid_is_running() {
@@ -1096,9 +1190,9 @@ pid_is_workspace_browser_tunnel() {
   local command_line
 
   command_line="$(pid_command_line "${pid}")"
-  [[ "${command_line}" == *"kubectl"* ]] \
-    && [[ "${command_line}" == *"port-forward"* ]] \
-    && [[ "${command_line}" == *"anyscale-gateway"* ]]
+  [[ "${command_line}" == *"kubectl"* ]] &&
+    [[ "${command_line}" == *"port-forward"* ]] &&
+    [[ "${command_line}" == *"anyscale-gateway"* ]]
 }
 
 port_listeners_are_workspace_browser_tunnels() {
@@ -1306,9 +1400,9 @@ record_focused_validation_result() {
 
   FOCUSED_VALIDATION_RESULTS+=("${status}|${check_id}|${label}|${logfile}")
   case "${status}" in
-    PASS) ((FOCUSED_VALIDATION_PASS_COUNT+=1)) ;;
-    FAIL) ((FOCUSED_VALIDATION_FAIL_COUNT+=1)) ;;
-    SKIP) ((FOCUSED_VALIDATION_SKIP_COUNT+=1)) ;;
+    PASS) ((FOCUSED_VALIDATION_PASS_COUNT += 1)) ;;
+    FAIL) ((FOCUSED_VALIDATION_FAIL_COUNT += 1)) ;;
+    SKIP) ((FOCUSED_VALIDATION_SKIP_COUNT += 1)) ;;
   esac
 }
 
@@ -1324,7 +1418,10 @@ run_focused_validation_check() {
   printf '\n==> %s\n' "${label}"
   local exit_code
   set +e
-  ( set -e; "$@" ) 2>&1 | tee "${logfile}"
+  (
+    set -e
+    "$@"
+  ) 2>&1 | tee "${logfile}"
   exit_code=${PIPESTATUS[0]}
   set -e
 
@@ -1348,7 +1445,7 @@ skip_focused_validation_check() {
 
   logfile="$(focused_validation_report_dir)/${check_id}.log"
   display_logfile="$(focused_validation_display_path "${logfile}")"
-  printf '%s\n' "${reason}" > "${logfile}"
+  printf '%s\n' "${reason}" >"${logfile}"
   record_focused_validation_result "SKIP" "${check_id}" "${label}" "${display_logfile}"
   printf '[SKIP] %s\n' "${label}"
   printf '       reason: %s\n' "${reason}"
@@ -1505,9 +1602,9 @@ use_bastion_kubeconfig_if_present() {
   pid="$(pid_from_file "${pidfile}")"
   port="$(cat "${portfile}" 2>/dev/null || true)"
 
-  if [[ -f "${kubeconfig_file}" && -n "${port}" ]] \
-    && pid_is_running "${pid}" \
-    && listener_is_ready "${port}"; then
+  if [[ -f "${kubeconfig_file}" && -n "${port}" ]] &&
+    pid_is_running "${pid}" &&
+    listener_is_ready "${port}"; then
     current_server="$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null || true)"
     if [[ ! "${current_server}" =~ ^https://(127\.0\.0\.1|localhost):[0-9]+/?$ ]]; then
       export_kubeconfig_env "${kubeconfig_file}"
@@ -1677,7 +1774,7 @@ write_workspace_browser_proxy_script() {
   local script_path
 
   script_path="$(workspace_browser_proxy_script_path)"
-  cat > "${script_path}" <<'PY'
+  cat >"${script_path}" <<'PY'
 #!/usr/bin/env python3
 import argparse
 import selectors
@@ -1841,7 +1938,7 @@ write_workspace_browser_proxy_pac() {
   local pac_path
 
   pac_path="$(workspace_browser_proxy_pacfile)"
-  cat > "${pac_path}" <<EOF
+  cat >"${pac_path}" <<EOF
 function FindProxyForURL(url, host) {
   if (host == "session-${session_suffix}.i.azure.anyscaleuserdata.com" ||
       host == "vscode-session-${session_suffix}.i.azure.anyscaleuserdata.com" ||
@@ -1878,13 +1975,13 @@ start_workspace_browser_proxy() {
 
   logfile="$(workspace_browser_proxy_logfile)"
   script_path="$(workspace_browser_proxy_script_path)"
-  : > "${logfile}"
+  : >"${logfile}"
 
   nohup python3 "${script_path}" \
     --listen-port "${proxy_port}" \
     --session-suffix "${session_suffix}" \
     --local-http-port "${http_port}" \
-    --local-https-port "${https_port}" > "${logfile}" 2>&1 &
+    --local-https-port "${https_port}" >"${logfile}" 2>&1 &
   proxy_pid="$!"
 
   if ! wait_for_local_listener "${proxy_port}" 30; then
@@ -1893,8 +1990,8 @@ start_workspace_browser_proxy() {
     die "Workspace browser proxy did not open on port ${proxy_port}."
   fi
 
-  printf '%s\n' "${proxy_pid}" > "$(workspace_browser_proxy_pidfile)"
-  printf '%s\n' "${proxy_port}" > "$(workspace_browser_proxy_portfile)"
+  printf '%s\n' "${proxy_pid}" >"$(workspace_browser_proxy_pidfile)"
+  printf '%s\n' "${proxy_port}" >"$(workspace_browser_proxy_portfile)"
   printf 'proxy_port=%s\n' "${proxy_port}"
   printf 'proxy_pac=%s\n' "$(workspace_browser_proxy_pacfile)"
 }
@@ -1936,7 +2033,7 @@ write_workspace_browser_user_prefs() {
   local profile_dir
 
   profile_dir="$(workspace_browser_profile_dir)"
-  cat > "${profile_dir}/user.js" <<EOF
+  cat >"${profile_dir}/user.js" <<EOF
 user_pref("app.normandy.first_run", false);
 user_pref("browser.shell.checkDefaultBrowser", false);
 user_pref("browser.tabs.warnOnClose", false);
@@ -1976,7 +2073,7 @@ workspace_browser_tunnel() {
   shift || true
 
   local pidfile http_portfile https_portfile hostfile logfile pid http_port https_port host session_value
-  local ingress_name gateway_namespace gateway_service listener_pid launcher_pid http_status https_status tracked_http_port tracked_https_port tracked_host
+  local ingress_name gateway_namespace gateway_service listener_pid launcher_pid http_status https_status tracked_http_port tracked_https_port
   pidfile="$(workspace_browser_tunnel_pidfile)"
   http_portfile="$(workspace_browser_tunnel_http_portfile)"
   https_portfile="$(workspace_browser_tunnel_https_portfile)"
@@ -1992,7 +2089,7 @@ workspace_browser_tunnel() {
       local requested_bastion_port candidate_bastion_port
       while [[ $# -gt 0 ]]; do
         case "$1" in
-          --session-id|--cluster-id|--session-host|--host)
+          --session-id | --cluster-id | --session-host | --host)
             [[ $# -ge 2 ]] || die "$1 requires a value."
             session_value="$2"
             shift 2
@@ -2007,7 +2104,7 @@ workspace_browser_tunnel() {
             https_port="$2"
             shift 2
             ;;
-          --help|-h)
+          --help | -h)
             cat <<'USAGE'
 Usage:
   ./scripts/setup.sh workspace-browser-tunnel start --session-id ses_xxx [--http-port 18081] [--https-port 18443]
@@ -2037,23 +2134,21 @@ USAGE
       host="$(workspace_browser_primary_host "$(workspace_browser_session_suffix "${session_value}")")"
       ingress_name="ses-$(workspace_browser_session_suffix "${session_value}")-head"
 
-      kubectl -n anyscale-operator get ingress "${ingress_name}" >/dev/null 2>&1 \
-        || kubectl -n anyscale-operator get httproute "${ingress_name}" >/dev/null 2>&1 \
-        || die "Neither Ingress nor HTTPRoute ${ingress_name} was found in namespace anyscale-operator. Confirm the session is still live before tunneling it."
+      kubectl -n anyscale-operator get ingress "${ingress_name}" >/dev/null 2>&1 ||
+        kubectl -n anyscale-operator get httproute "${ingress_name}" >/dev/null 2>&1 ||
+        die "Neither Ingress nor HTTPRoute ${ingress_name} was found in namespace anyscale-operator. Confirm the session is still live before tunneling it."
       gateway_namespace="$(anyscale_gateway_namespace)"
       gateway_service="$(resolve_anyscale_gateway_service_name)"
 
       pid="$(pid_from_file "${pidfile}")"
       tracked_http_port="$(cat "${http_portfile}" 2>/dev/null || true)"
       tracked_https_port="$(cat "${https_portfile}" 2>/dev/null || true)"
-      tracked_host="$(cat "${hostfile}" 2>/dev/null || true)"
-
-      if pid_is_running "${pid}" \
-        && [[ -n "${tracked_http_port}" && -n "${tracked_https_port}" ]] \
-        && listener_is_ready "${tracked_http_port}" \
-        && listener_is_ready "${tracked_https_port}" \
-        && port_listeners_are_workspace_browser_tunnels "${tracked_http_port}" \
-        && port_listeners_are_workspace_browser_tunnels "${tracked_https_port}"; then
+      if pid_is_running "${pid}" &&
+        [[ -n "${tracked_http_port}" && -n "${tracked_https_port}" ]] &&
+        listener_is_ready "${tracked_http_port}" &&
+        listener_is_ready "${tracked_https_port}" &&
+        port_listeners_are_workspace_browser_tunnels "${tracked_http_port}" &&
+        port_listeners_are_workspace_browser_tunnels "${tracked_https_port}"; then
         if [[ "${tracked_http_port}" != "${http_port}" || "${tracked_https_port}" != "${https_port}" ]]; then
           log "Restarting existing workspace browser tunnel on ports ${tracked_http_port}/${tracked_https_port} to use ${http_port}/${https_port}"
           kill "${pid}" 2>/dev/null || true
@@ -2063,7 +2158,7 @@ USAGE
           fi
           clear_runtime_files "${pidfile}" "${http_portfile}" "${https_portfile}" "${hostfile}"
         else
-          printf '%s\n' "${host}" > "${hostfile}"
+          printf '%s\n' "${host}" >"${hostfile}"
           log "Workspace browser tunnel already running on 127.0.0.1:${http_port} and 127.0.0.1:${https_port}"
           print_workspace_browser_tunnel_details "${host}" "${http_port}" "${https_port}"
           printf 'log file: %s\n' "${logfile}"
@@ -2087,9 +2182,9 @@ USAGE
         die "Requested local browser-tunnel ports are still in use after cleanup. Pick different ports."
       fi
 
-      : > "${logfile}"
+      : >"${logfile}"
       log "Starting workspace browser tunnel for ${host} through ${gateway_namespace}/${gateway_service} on 127.0.0.1:${http_port}/${https_port}"
-      nohup kubectl -n "${gateway_namespace}" port-forward "service/${gateway_service}" "${http_port}:80" "${https_port}:443" > "${logfile}" 2>&1 &
+      nohup kubectl -n "${gateway_namespace}" port-forward "service/${gateway_service}" "${http_port}:80" "${https_port}:443" >"${logfile}" 2>&1 &
       launcher_pid="$!"
 
       if ! wait_for_local_listener "${http_port}" 30 || ! wait_for_local_listener "${https_port}" 30; then
@@ -2104,10 +2199,10 @@ USAGE
       listener_pid="$(first_listener_pid "${http_port}" 2>/dev/null || true)"
       [[ -n "${listener_pid}" ]] || die "Workspace browser tunnel opened but no listener PID was found."
 
-      printf '%s\n' "${listener_pid}" > "${pidfile}"
-      printf '%s\n' "${http_port}" > "${http_portfile}"
-      printf '%s\n' "${https_port}" > "${https_portfile}"
-      printf '%s\n' "${host}" > "${hostfile}"
+      printf '%s\n' "${listener_pid}" >"${pidfile}"
+      printf '%s\n' "${http_port}" >"${http_portfile}"
+      printf '%s\n' "${https_port}" >"${https_portfile}"
+      printf '%s\n' "${host}" >"${hostfile}"
 
       http_status="$(curl -sS -o /dev/null -w '%{http_code}' -H "Host: ${host}" "http://127.0.0.1:${http_port}/" || true)"
       https_status="$(curl -skS -o /dev/null -w '%{http_code}' --resolve "${host}:${https_port}:127.0.0.1" "https://${host}:${https_port}/" || true)"
@@ -2132,13 +2227,13 @@ USAGE
       https_port="$(cat "${https_portfile}" 2>/dev/null || true)"
       host="$(cat "${hostfile}" 2>/dev/null || true)"
 
-      if [[ -n "${http_port}" && -n "${https_port}" && -n "${host}" ]] \
-        && listener_is_ready "${http_port}" \
-        && listener_is_ready "${https_port}" \
-        && port_listeners_are_workspace_browser_tunnels "${http_port}" \
-        && port_listeners_are_workspace_browser_tunnels "${https_port}"; then
+      if [[ -n "${http_port}" && -n "${https_port}" && -n "${host}" ]] &&
+        listener_is_ready "${http_port}" &&
+        listener_is_ready "${https_port}" &&
+        port_listeners_are_workspace_browser_tunnels "${http_port}" &&
+        port_listeners_are_workspace_browser_tunnels "${https_port}"; then
         pid="$(first_listener_pid "${http_port}" 2>/dev/null || true)"
-        [[ -n "${pid}" ]] && printf '%s\n' "${pid}" > "${pidfile}"
+        [[ -n "${pid}" ]] && printf '%s\n' "${pid}" >"${pidfile}"
         printf 'status=running\n'
         printf 'pid=%s\n' "${pid}"
         print_workspace_browser_tunnel_details "${host}" "${http_port}" "${https_port}"
@@ -2206,7 +2301,7 @@ workspace_head_forward() {
     start)
       while [[ $# -gt 0 ]]; do
         case "$1" in
-          --session-id|--cluster-id|--session-host|--host)
+          --session-id | --cluster-id | --session-host | --host)
             [[ $# -ge 2 ]] || die "$1 requires a value."
             session_value="$2"
             shift 2
@@ -2221,7 +2316,7 @@ workspace_head_forward() {
             http_port="$2"
             shift 2
             ;;
-          --help|-h)
+          --help | -h)
             cat <<'USAGE'
 Usage:
   ./scripts/setup.sh workspace-head-forward --session-id ses_xxx [--dashboard-port 18265] [--http-port 18080]
@@ -2249,18 +2344,18 @@ USAGE
       session_id="$(workspace_browser_session_id "${session_value}")"
       service_name="${session_id//_/-}-head"
 
-      kubectl -n anyscale-operator get service "${service_name}" >/dev/null 2>&1 \
-        || die "Service ${service_name} was not found in namespace anyscale-operator. Confirm the session is still live before forwarding it."
+      kubectl -n anyscale-operator get service "${service_name}" >/dev/null 2>&1 ||
+        die "Service ${service_name} was not found in namespace anyscale-operator. Confirm the session is still live before forwarding it."
 
       pid="$(pid_from_file "${pidfile}")"
       tracked_dashboard_port="$(cat "${dashboard_portfile}" 2>/dev/null || true)"
       tracked_http_port="$(cat "${http_portfile}" 2>/dev/null || true)"
       tracked_session="$(cat "${sessionfile}" 2>/dev/null || true)"
 
-      if pid_is_running "${pid}" \
-        && [[ -n "${tracked_dashboard_port}" && -n "${tracked_http_port}" ]] \
-        && listener_is_ready "${tracked_dashboard_port}" \
-        && listener_is_ready "${tracked_http_port}"; then
+      if pid_is_running "${pid}" &&
+        [[ -n "${tracked_dashboard_port}" && -n "${tracked_http_port}" ]] &&
+        listener_is_ready "${tracked_dashboard_port}" &&
+        listener_is_ready "${tracked_http_port}"; then
         if [[ "${tracked_dashboard_port}" == "${dashboard_port}" && "${tracked_http_port}" == "${http_port}" && "${tracked_session}" == "${session_id}" ]]; then
           log "Workspace head port-forward already running on 127.0.0.1:${dashboard_port} and 127.0.0.1:${http_port}"
           print_workspace_head_forward_details "${session_id}" "${dashboard_port}" "${http_port}"
@@ -2283,9 +2378,9 @@ USAGE
         die "Local HTTP port ${http_port} is already in use. Pick another with --http-port."
       fi
 
-      : > "${logfile}"
+      : >"${logfile}"
       log "Starting workspace head port-forward for ${service_name} on 127.0.0.1:${dashboard_port}/${http_port}"
-      nohup kubectl -n anyscale-operator port-forward service/"${service_name}" "${dashboard_port}:8265" "${http_port}:80" > "${logfile}" 2>&1 &
+      nohup kubectl -n anyscale-operator port-forward service/"${service_name}" "${dashboard_port}:8265" "${http_port}:80" >"${logfile}" 2>&1 &
       launcher_pid="$!"
 
       if ! wait_for_local_listener "${dashboard_port}" 30 || ! wait_for_local_listener "${http_port}" 30; then
@@ -2300,10 +2395,10 @@ USAGE
       listener_pid="$(first_listener_pid "${dashboard_port}" 2>/dev/null || true)"
       [[ -n "${listener_pid}" ]] || die "Workspace head port-forward opened but no listener PID was found."
 
-      printf '%s\n' "${listener_pid}" > "${pidfile}"
-      printf '%s\n' "${dashboard_port}" > "${dashboard_portfile}"
-      printf '%s\n' "${http_port}" > "${http_portfile}"
-      printf '%s\n' "${session_id}" > "${sessionfile}"
+      printf '%s\n' "${listener_pid}" >"${pidfile}"
+      printf '%s\n' "${dashboard_port}" >"${dashboard_portfile}"
+      printf '%s\n' "${http_port}" >"${http_portfile}"
+      printf '%s\n' "${session_id}" >"${sessionfile}"
 
       print_workspace_head_forward_details "${session_id}" "${dashboard_port}" "${http_port}"
       printf 'log file: %s\n' "${logfile}"
@@ -2314,10 +2409,10 @@ USAGE
       http_port="$(cat "${http_portfile}" 2>/dev/null || true)"
       session_id="$(cat "${sessionfile}" 2>/dev/null || true)"
 
-      if [[ -n "${dashboard_port}" && -n "${http_port}" && -n "${session_id}" ]] \
-        && pid_is_running "${pid}" \
-        && listener_is_ready "${dashboard_port}" \
-        && listener_is_ready "${http_port}"; then
+      if [[ -n "${dashboard_port}" && -n "${http_port}" && -n "${session_id}" ]] &&
+        pid_is_running "${pid}" &&
+        listener_is_ready "${dashboard_port}" &&
+        listener_is_ready "${http_port}"; then
         printf 'status=running\n'
         printf 'pid=%s\n' "${pid}"
         print_workspace_head_forward_details "${session_id}" "${dashboard_port}" "${http_port}"
@@ -2389,7 +2484,7 @@ workspace_head_open() {
     start)
       while [[ $# -gt 0 ]]; do
         case "$1" in
-          --session-id|--cluster-id|--session-host|--host)
+          --session-id | --cluster-id | --session-host | --host)
             [[ $# -ge 2 ]] || die "$1 requires a value."
             session_value="$2"
             shift 2
@@ -2419,7 +2514,7 @@ workspace_head_open() {
             ingress_https_port="$2"
             shift 2
             ;;
-          --help|-h)
+          --help | -h)
             cat <<'USAGE'
 Usage:
   ./scripts/setup.sh workspace-head-open --session-id ses_xxx [--browser firefox] [--dashboard-port 18265] [--http-port 18080] [--ingress-http-port 18081] [--ingress-https-port 18443]
@@ -2457,7 +2552,7 @@ USAGE
       fi
       rm -rf "${profile_dir}"
       mkdir -p "${profile_dir}"
-      : > "${logfile}"
+      : >"${logfile}"
 
       if workspace_browser_proxy_is_running; then
         stop_workspace_browser_proxy_processes || true
@@ -2473,16 +2568,16 @@ USAGE
         -no-remote \
         -new-instance \
         -profile "${profile_dir}" \
-        "${browser_url}" > "${logfile}" 2>&1 &
+        "${browser_url}" >"${logfile}" 2>&1 &
       launcher_pid="$!"
 
       sleep 2
       workspace_browser_app_is_running || die "The temporary browser did not stay running. Check ${logfile}."
 
-      printf '%s\n' "${launcher_pid}" > "$(workspace_browser_app_pidfile)"
-      printf '%s\n' "${browser_binary}" > "$(workspace_browser_app_browserfile)"
-      printf '%s\n' "${browser_url}" > "$(workspace_browser_app_urlfile)"
-      printf '%s\n' "ray-dashboard-${session_id}" > "$(workspace_browser_app_hostfile)"
+      printf '%s\n' "${launcher_pid}" >"$(workspace_browser_app_pidfile)"
+      printf '%s\n' "${browser_binary}" >"$(workspace_browser_app_browserfile)"
+      printf '%s\n' "${browser_url}" >"$(workspace_browser_app_urlfile)"
+      printf '%s\n' "ray-dashboard-${session_id}" >"$(workspace_browser_app_hostfile)"
 
       print_workspace_head_forward_details "${session_id}" "${dashboard_port}" "${http_port}"
       print_workspace_browser_app_details "${browser_binary}" "${browser_url}" "ray-dashboard-${session_id}" "${proxy_port}" "${proxy_pac}"
@@ -2511,7 +2606,7 @@ USAGE
             keep_forward=true
             shift
             ;;
-          --help|-h)
+          --help | -h)
             cat <<'USAGE'
 Usage:
   ./scripts/setup.sh workspace-head-open stop [--keep-forward]
@@ -2581,7 +2676,7 @@ workspace_browser_ready() {
     start)
       while [[ $# -gt 0 ]]; do
         case "$1" in
-          --session-id|--cluster-id|--session-host|--host)
+          --session-id | --cluster-id | --session-host | --host)
             [[ $# -ge 2 ]] || die "$1 requires a value."
             session_value="$2"
             shift 2
@@ -2601,7 +2696,7 @@ workspace_browser_ready() {
             https_port="$2"
             shift 2
             ;;
-          --help|-h)
+          --help | -h)
             cat <<'USAGE'
 Usage:
   ./scripts/setup.sh workspace-browser-ready --session-id ses_xxx [--bastion-port 64435] [--http-port 18081] [--https-port 18443]
@@ -2649,7 +2744,7 @@ USAGE
       bastion_tunnel status || bastion_status=$?
       browser_status=0
       workspace_browser_tunnel status || browser_status=$?
-      if (( bastion_status != 0 || browser_status != 0 )); then
+      if ((bastion_status != 0 || browser_status != 0)); then
         return 1
       fi
       ;;
@@ -2660,7 +2755,7 @@ USAGE
             keep_bastion=true
             shift
             ;;
-          --help|-h)
+          --help | -h)
             cat <<'USAGE'
 Usage:
   ./scripts/setup.sh workspace-browser-ready stop [--keep-bastion]
@@ -2716,7 +2811,7 @@ workspace_browser_open() {
     start)
       while [[ $# -gt 0 ]]; do
         case "$1" in
-          --session-id|--cluster-id|--session-host|--host)
+          --session-id | --cluster-id | --session-host | --host)
             [[ $# -ge 2 ]] || die "$1 requires a value."
             session_value="$2"
             shift 2
@@ -2741,7 +2836,7 @@ workspace_browser_open() {
             https_port="$2"
             shift 2
             ;;
-          --help|-h)
+          --help | -h)
             cat <<'USAGE'
 Usage:
   ./scripts/setup.sh workspace-browser-open --session-id ses_xxx [--browser firefox] [--bastion-port 64435] [--http-port 18081] [--https-port 18443]
@@ -2778,7 +2873,7 @@ USAGE
       fi
       rm -rf "${profile_dir}"
       mkdir -p "${profile_dir}"
-      : > "${logfile}"
+      : >"${logfile}"
 
       if workspace_browser_proxy_is_running; then
         stop_workspace_browser_proxy_processes || true
@@ -2794,16 +2889,16 @@ USAGE
         -no-remote \
         -new-instance \
         -profile "${profile_dir}" \
-        "${browser_url}" > "${logfile}" 2>&1 &
+        "${browser_url}" >"${logfile}" 2>&1 &
       launcher_pid="$!"
 
       sleep 2
       workspace_browser_app_is_running || die "The temporary browser did not stay running. Check ${logfile}."
 
-      printf '%s\n' "${launcher_pid}" > "$(workspace_browser_app_pidfile)"
-      printf '%s\n' "${browser_binary}" > "$(workspace_browser_app_browserfile)"
-      printf '%s\n' "${browser_url}" > "$(workspace_browser_app_urlfile)"
-      printf '%s\n' "${host}" > "$(workspace_browser_app_hostfile)"
+      printf '%s\n' "${launcher_pid}" >"$(workspace_browser_app_pidfile)"
+      printf '%s\n' "${browser_binary}" >"$(workspace_browser_app_browserfile)"
+      printf '%s\n' "${browser_url}" >"$(workspace_browser_app_urlfile)"
+      printf '%s\n' "${host}" >"$(workspace_browser_app_hostfile)"
 
       print_workspace_browser_app_details "${browser_binary}" "${browser_url}" "${host}" "${proxy_port}" "${proxy_pac}"
       printf 'browser_log=%s\n' "${logfile}"
@@ -2833,7 +2928,7 @@ USAGE
             keep_network=true
             shift
             ;;
-          --help|-h)
+          --help | -h)
             cat <<'USAGE'
 Usage:
   ./scripts/setup.sh workspace-browser-open stop [--keep-network]
@@ -2898,7 +2993,7 @@ anyscale_cli_auth_available() {
   [[ -n "${ANYSCALE_CLI_TOKEN:-}" ]] && return 0
   cli_bin="$(anyscale_cli_bin)"
   output="$(ANYSCALE_HOST="${ANYSCALE_HOST:-$(default_anyscale_host)}" \
-    "${cli_bin}" cloud list --max-items 1 --page-size 1 --no-interactive --json >/dev/null 2>&1)" && return 0
+    "${cli_bin}" cloud list --max-items 1 --page-size 1 --no-interactive --json 2>&1)" && return 0
   [[ "${output}" != *"Credentials not found"* ]] || return 1
   return 1
 }
@@ -3013,14 +3108,81 @@ validate() {
   run_with_timeout "${SETUP_TIMEOUT_TERRAFORM_VALIDATE_SECONDS}" terraform validate
 }
 
+terraform_contract_tests() {
+  [[ $# -eq 0 ]] || die "terraform contract tests do not accept arguments."
+
+  load_env
+  require_env_var TF_VAR_azure_subscription_id
+  require_env_var TF_VAR_azure_tenant_id
+
+  local azure_subscription_id="${TF_VAR_azure_subscription_id}"
+  local azure_tenant_id="${TF_VAR_azure_tenant_id}"
+  local tf_var_name
+
+  # Plan contracts own their non-provider fixture values. Keep only the real
+  # Azure provider context sourced from .env so live deployment settings cannot
+  # override test fixtures.
+  while IFS= read -r tf_var_name; do
+    unset "${tf_var_name}"
+  done < <(compgen -A variable TF_VAR_)
+
+  # Supply generic values for required inputs that test files do not own.
+  # File-level test fixtures remain authoritative for contract assertions.
+  set +u
+  set -a
+  # shellcheck disable=SC1090
+  source "${ENV_TEMPLATE}"
+  set +a
+  set -u
+
+  export TF_VAR_azure_subscription_id="${azure_subscription_id}"
+  export TF_VAR_azure_tenant_id="${azure_tenant_id}"
+
+  for tf_var_name in \
+    anyscale_fqdns \
+    anyscale_jump_host_fqdns \
+    anyscale_operator_namespace \
+    anyscale_operator_serviceaccount \
+    anyscale_platform \
+    azure_location \
+    container_registry_fqdns \
+    cpu_vm_size \
+    dns_forwarding_rules \
+    dns_service_ip \
+    enable_browser_host \
+    environment \
+    gpu_pool_configs \
+    kubernetes_version \
+    linux_jump_host_admin_ssh_public_key \
+    linux_jump_host_admin_username \
+    linux_jump_host_vm_size \
+    log_analytics_retention_days \
+    project \
+    region_short \
+    service_cidr \
+    storage_cors_rule \
+    subnet_cidrs \
+    system_vm_size \
+    tags \
+    terraform_managed_diagnostic_settings_enabled \
+    vnet_address_space; do
+    unset "TF_VAR_${tf_var_name}"
+  done
+  rm -f "${GENERATED_TFVARS}"
+
+  log "Running plan-only Terraform contract tests with provider context from ${ENV_FILE}"
+  run_with_timeout "${SETUP_TIMEOUT_TERRAFORM_TEST_SECONDS}" \
+    terraform test -test-directory=tests
+}
+
 # The plan-time contract tests (tests/*.tftest.hcl) assert on fixture inputs
 # (project=tftest, etc.) and must run in a clean environment. The harness deploy
-# and verify paths render the operator's real terraform.auto.tfvars.json and
-# export computed TF_VAR_* values, which terraform test resolves over the test
-# fixtures and breaks the naming/contract assertions. They are therefore run as a
-# standalone gate (the reviewer, the quality gate, or `terraform -chdir=infra/terraform
-# test`) rather than inside a live deploy. `validate()` above checks that the
-# real, rendered configuration is syntactically valid.
+# and verify paths export the operator's real, computed TF_VAR_* values from
+# .env, which terraform test resolves over the test fixtures and breaks the
+# naming/contract assertions. They are therefore run as a standalone gate (the
+# reviewer, the quality gate, or `terraform -chdir=infra/terraform test`) rather
+# than inside a live deploy. `validate()` above checks that the real, exported
+# configuration is syntactically valid.
 
 ###############################################################################
 run_terraform_command_with_retry() {
@@ -3036,8 +3198,8 @@ run_terraform_command_with_retry() {
 
   output_file="${CACHE_DIR}/terraform-${action}-retry.log"
 
-  while (( attempt <= max_attempts )); do
-    : > "${output_file}"
+  while ((attempt <= max_attempts)); do
+    : >"${output_file}"
     set +e
     run_with_timeout "${timeout_seconds}" "$@" >"${output_file}" 2>&1
     rc=$?
@@ -3053,7 +3215,7 @@ run_terraform_command_with_retry() {
     fi
 
     if grep -Eqi 'Error acquiring the state lock|resource temporarily unavailable|Lock Info:' "${output_file}"; then
-      if (( attempt < max_attempts )); then
+      if ((attempt < max_attempts)); then
         warn "Terraform ${action} hit a temporary state lock (attempt ${attempt}/${max_attempts}); retrying in ${delay_seconds}s."
         sleep "${delay_seconds}"
         attempt=$((attempt + 1))
@@ -3111,7 +3273,7 @@ setup_run_init() {
   SETUP_STAGE_RESULTS=()
 
   mkdir -p "${SETUP_STAGE_LOG_DIR}"
-  printf 'stage\tresult\tduration_seconds\tlog\n' > "${SETUP_RUN_DIR}/stages.tsv"
+  printf 'stage\tresult\tduration_seconds\tlog\n' >"${SETUP_RUN_DIR}/stages.tsv"
   log "Run logs: ${SETUP_RUN_DIR}"
 }
 
@@ -3126,7 +3288,10 @@ run_stage() {
 
   log "[${SETUP_STAGE_INDEX}/${SETUP_STAGE_TOTAL}] ${stage_name} started"
   set +e
-  ( set -e; "$@" ) 2>&1 | tee "${log_file}"
+  (
+    set -e
+    "$@"
+  ) 2>&1 | tee "${log_file}"
   exit_code=${PIPESTATUS[0]}
   set -e
 
@@ -3136,13 +3301,13 @@ run_stage() {
   if [[ "${exit_code}" -eq 0 ]]; then
     log "[${SETUP_STAGE_INDEX}/${SETUP_STAGE_TOTAL}] ${stage_name} ok (${duration}s)"
     SETUP_STAGE_RESULTS+=("${stage_name}:PASS:${duration}s")
-    printf '%s\tPASS\t%s\t%s\n' "${stage_name}" "${duration}" "${log_file}" >> "${SETUP_RUN_DIR}/stages.tsv"
+    printf '%s\tPASS\t%s\t%s\n' "${stage_name}" "${duration}" "${log_file}" >>"${SETUP_RUN_DIR}/stages.tsv"
     return 0
   fi
 
   warn "[${SETUP_STAGE_INDEX}/${SETUP_STAGE_TOTAL}] ${stage_name} failed (${duration}s). See ${log_file}"
   SETUP_STAGE_RESULTS+=("${stage_name}:FAIL:${duration}s")
-  printf '%s\tFAIL\t%s\t%s\n' "${stage_name}" "${duration}" "${log_file}" >> "${SETUP_RUN_DIR}/stages.tsv"
+  printf '%s\tFAIL\t%s\t%s\n' "${stage_name}" "${duration}" "${log_file}" >>"${SETUP_RUN_DIR}/stages.tsv"
   setup_run_summary
   exit "${exit_code}"
 }
@@ -3160,7 +3325,7 @@ setup_run_summary() {
       IFS=':' read -r stage_name stage_result stage_duration <<<"${result_line}"
       printf '| `%s` | %s | %s |\n' "${stage_name}" "${stage_result}" "${stage_duration}"
     done
-  } > "${SETUP_RUN_DIR}/summary.md"
+  } >"${SETUP_RUN_DIR}/summary.md"
 
   log "Summary: ${SETUP_RUN_DIR}/summary.md"
 }
@@ -3380,8 +3545,8 @@ invoke_jump_host_bootstrap() {
   local cloud_deployment_id=""
   if [[ "${phase}" == "phase-b" ]]; then
     cloud_deployment_id="$(terraform_output_raw anyscale_cloud_deployment_id 2>/dev/null || true)"
-    [[ -n "${cloud_deployment_id}" && "${cloud_deployment_id}" != "null" ]] \
-      || die "Terraform output anyscale_cloud_deployment_id is empty. Apply platform stage first."
+    [[ -n "${cloud_deployment_id}" && "${cloud_deployment_id}" != "null" ]] ||
+      die "Terraform output anyscale_cloud_deployment_id is empty. Apply platform stage first."
   fi
 
   # ---- Open Bastion tunnel to jump host port 22 ----------------------------
@@ -3482,24 +3647,24 @@ invoke_jump_host_bootstrap() {
   log "Running bootstrap-k8s.sh ${phase} on jump host ..."
   {
     printf 'set -euo pipefail\n'
-    printf 'export %s=%q\n' "AKS_CLUSTER_NAME"              "${aks_cluster}"
-    printf 'export %s=%q\n' "AKS_RG"                        "${aks_rg}"
-    printf 'export %s=%q\n' "OPERATOR_NAMESPACE"             "${operator_ns}"
-    printf 'export %s=%q\n' "OPERATOR_SA_NAME"               "${operator_sa}"
-    printf 'export %s=%q\n' "WORKLOAD_IDENTITY_CLIENT_ID"    "${identity_client_id}"
-    printf 'export %s=%q\n' "WORKLOAD_IDENTITY_TENANT_ID"    "${tenant_id}"
-    printf 'export %s=%q\n' "EXTENSION_RELEASE_NAME"         "${extension_release_name}"
-    printf 'export %s=%q\n' "GPU_RESOURCES_NAMESPACE"        "${gpu_ns}"
-    printf 'export %s=%q\n' "NVIDIA_RELEASE_NAME"            "${nvidia_release}"
-    printf 'export %s=%q\n' "NVIDIA_CHART_VERSION"           "${nvidia_version}"
-    printf 'export %s=%q\n' "GATEWAY_RELEASE_NAME"           "${gw_release}"
-    printf 'export %s=%q\n' "GATEWAY_NAME"                   "${gw_name}"
-    printf 'export %s=%q\n' "GATEWAY_CLASS_NAME"             "${gw_class}"
-    printf 'export %s=%q\n' "GATEWAY_SERVICE_NAME"           "${gw_service_name}"
-    printf 'export %s=%q\n' "GATEWAY_SERVICE_HTTPS_ENABLED"  "${gw_https_enabled}"
-    printf 'export %s=%q\n' "GATEWAY_PRIVATE_IP"             "${gateway_ip}"
+    printf 'export %s=%q\n' "AKS_CLUSTER_NAME" "${aks_cluster}"
+    printf 'export %s=%q\n' "AKS_RG" "${aks_rg}"
+    printf 'export %s=%q\n' "OPERATOR_NAMESPACE" "${operator_ns}"
+    printf 'export %s=%q\n' "OPERATOR_SA_NAME" "${operator_sa}"
+    printf 'export %s=%q\n' "WORKLOAD_IDENTITY_CLIENT_ID" "${identity_client_id}"
+    printf 'export %s=%q\n' "WORKLOAD_IDENTITY_TENANT_ID" "${tenant_id}"
+    printf 'export %s=%q\n' "EXTENSION_RELEASE_NAME" "${extension_release_name}"
+    printf 'export %s=%q\n' "GPU_RESOURCES_NAMESPACE" "${gpu_ns}"
+    printf 'export %s=%q\n' "NVIDIA_RELEASE_NAME" "${nvidia_release}"
+    printf 'export %s=%q\n' "NVIDIA_CHART_VERSION" "${nvidia_version}"
+    printf 'export %s=%q\n' "GATEWAY_RELEASE_NAME" "${gw_release}"
+    printf 'export %s=%q\n' "GATEWAY_NAME" "${gw_name}"
+    printf 'export %s=%q\n' "GATEWAY_CLASS_NAME" "${gw_class}"
+    printf 'export %s=%q\n' "GATEWAY_SERVICE_NAME" "${gw_service_name}"
+    printf 'export %s=%q\n' "GATEWAY_SERVICE_HTTPS_ENABLED" "${gw_https_enabled}"
+    printf 'export %s=%q\n' "GATEWAY_PRIVATE_IP" "${gateway_ip}"
     if [[ -n "${cloud_deployment_id}" ]]; then
-      printf 'export %s=%q\n' "CLOUD_DEPLOYMENT_ID"          "${cloud_deployment_id}"
+      printf 'export %s=%q\n' "CLOUD_DEPLOYMENT_ID" "${cloud_deployment_id}"
     fi
     printf 'cd %q && bash scripts/bootstrap-k8s.sh %q\n' \
       "${canonical_repo_path}" "${phase}"
@@ -3549,8 +3714,8 @@ deploy_init_validate_stage() {
 }
 
 foundation_state_complete() {
-  terraform state show module.aks.azurerm_kubernetes_cluster.this >/dev/null 2>&1 \
-    && terraform state show module.aks.azurerm_monitor_data_collection_rule.container_insights >/dev/null 2>&1
+  terraform state show module.aks.azurerm_kubernetes_cluster.this >/dev/null 2>&1 &&
+    terraform state show module.aks.azurerm_monitor_data_collection_rule.container_insights >/dev/null 2>&1
 }
 
 # Returns 0 (true) when a phase-1 (anyscale platform disabled) plan reports
@@ -3586,7 +3751,7 @@ deploy_foundation_stage() {
     return 0
   fi
 
-  ( deploy_e2e_phase1 )
+  (deploy_e2e_phase1)
 }
 
 deploy_platform_stage() {
@@ -3620,11 +3785,11 @@ deploy() {
         DEPLOY_FROM_SCRATCH=true
         shift
         ;;
-      --yes|-y)
+      --yes | -y)
         DEPLOY_FORCE_YES=true
         shift
         ;;
-      --help|-h)
+      --help | -h)
         cat <<'USAGE'
 Usage:
   ./scripts/setup.sh deploy
@@ -3648,15 +3813,15 @@ USAGE
   trap deploy_e2e_cleanup EXIT
 
   setup_run_init "deploy" 9
-  run_stage "prepare"               deploy_prepare_stage
-  run_stage "reset-or-state"        deploy_reset_stage
+  run_stage "prepare" deploy_prepare_stage
+  run_stage "reset-or-state" deploy_reset_stage
   run_stage "terraform-init-validate" deploy_init_validate_stage
-  run_stage "foundation"            deploy_foundation_stage
-  run_stage "bootstrap-a"           deploy_bootstrap_a_stage
-  run_stage "platform"              deploy_platform_stage
-  run_stage "bootstrap-b"           deploy_bootstrap_b_stage
-  run_stage "workspaces"            deploy_workspaces_stage
-  run_stage "health"                deploy_health_stage
+  run_stage "foundation" deploy_foundation_stage
+  run_stage "bootstrap-a" deploy_bootstrap_a_stage
+  run_stage "platform" deploy_platform_stage
+  run_stage "bootstrap-b" deploy_bootstrap_b_stage
+  run_stage "workspaces" deploy_workspaces_stage
+  run_stage "health" deploy_health_stage
   setup_run_summary
 
   log "Deployment complete. Run ./scripts/anyscale-aks.sh verify --full, then ./scripts/anyscale-aks.sh proof all."
@@ -3699,7 +3864,7 @@ verify() {
         VERIFY_SKIP_OBSERVABILITY=true
         shift
         ;;
-      --help|-h)
+      --help | -h)
         cat <<'USAGE'
 Usage:
   ./scripts/setup.sh verify --static
@@ -3818,6 +3983,7 @@ health() {
   local cpu_status_raw cpu_status gpu_status_raw gpu_status
   local cpu_health_wait_log gpu_health_wait_log
   local cpu_head_pod operator_log_matches workspace_log_matches
+  local gpu_enabled=false
 
   load_env
   sync_anyscale_cli_env
@@ -3826,6 +3992,10 @@ health() {
   require_anyscale_cli_auth
   ensure_cluster_access
   require_env_var ANYSCALE_CLOUD_NAME
+
+  if gpu_workloads_enabled; then
+    gpu_enabled=true
+  fi
 
   resource_group="$(resource_group_name)"
   cluster="$(target_aks_cluster_name)"
@@ -3881,8 +4051,8 @@ health() {
 
   cpu_status_raw="$(run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS}" \
     "${cli_bin}" workspace_v2 status \
-      --name "${cpu_workspace_name}" \
-      --cloud "${ANYSCALE_CLOUD_NAME}" 2>&1)"
+    --name "${cpu_workspace_name}" \
+    --cloud "${ANYSCALE_CLOUD_NAME}" 2>&1)"
   cpu_status="$(normalize_anyscale_workspace_status "${cpu_status_raw}")"
   [[ -n "${cpu_status}" ]] || cpu_status="UNKNOWN"
 
@@ -3899,34 +4069,38 @@ health() {
   fi
   wait_for_workspace_runtime_stable "${cpu_workspace_name}" "aks-cpu-" "${cpu_health_wait_log}"
 
-  gpu_status_raw="$(run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS}" \
-    "${cli_bin}" workspace_v2 status \
+  if [[ "${gpu_enabled}" == true ]]; then
+    gpu_status_raw="$(run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS}" \
+      "${cli_bin}" workspace_v2 status \
       --name "${gpu_workspace_name}" \
       --cloud "${ANYSCALE_CLOUD_NAME}" 2>&1)"
-  gpu_status="$(normalize_anyscale_workspace_status "${gpu_status_raw}")"
-  [[ -n "${gpu_status}" ]] || gpu_status="UNKNOWN"
+    gpu_status="$(normalize_anyscale_workspace_status "${gpu_status_raw}")"
+    [[ -n "${gpu_status}" ]] || gpu_status="UNKNOWN"
 
-  gpu_health_wait_log="$(harness_state_file "${gpu_workspace_name}.health.wait.log")"
-  case "${gpu_status}" in
-    CREATE_FAILED|FAILED|ERROR)
-      die "GPU workspace ${gpu_workspace_name} is unhealthy with API status ${gpu_status}."
-      ;;
-    RUNNING)
-      log "GPU workspace ${gpu_workspace_name} API status=${gpu_status}."
-      ;;
-    TERMINATED|TERMINATING)
-      warn "GPU workspace ${gpu_workspace_name} API status is ${gpu_status}; warm-starting before health check."
-      ensure_workload_workspace_running "${gpu_workspace_name}" "${cli_bin}" "${gpu_health_wait_log}"
-      ;;
-    *)
-      warn "GPU workspace ${gpu_workspace_name} API status is ${gpu_status}; confirming readiness from the Kubernetes runtime."
-      ;;
-  esac
-  wait_for_workspace_runtime_stable "${gpu_workspace_name}" "aks-gput4-" "${gpu_health_wait_log}"
+    gpu_health_wait_log="$(harness_state_file "${gpu_workspace_name}.health.wait.log")"
+    case "${gpu_status}" in
+      CREATE_FAILED | FAILED | ERROR)
+        die "GPU workspace ${gpu_workspace_name} is unhealthy with API status ${gpu_status}."
+        ;;
+      RUNNING)
+        log "GPU workspace ${gpu_workspace_name} API status=${gpu_status}."
+        ;;
+      TERMINATED | TERMINATING)
+        warn "GPU workspace ${gpu_workspace_name} API status is ${gpu_status}; warm-starting before health check."
+        ensure_workload_workspace_running "${gpu_workspace_name}" "${cli_bin}" "${gpu_health_wait_log}"
+        ;;
+      *)
+        warn "GPU workspace ${gpu_workspace_name} API status is ${gpu_status}; confirming readiness from the Kubernetes runtime."
+        ;;
+    esac
+    wait_for_workspace_runtime_stable "${gpu_workspace_name}" "aks-gput4-" "${gpu_health_wait_log}"
+  else
+    log "GPU workspace health is skipped because no GPU node pool is configured."
+  fi
 
-  operator_log_matches="$(kubectl logs -n "${namespace}" deploy/anyscale-operator -c operator --since=30m 2>&1 \
-    | egrep -i 'error|warn|fail|exception|backoff|forbidden' \
-    | tail -n 20 || true)"
+  operator_log_matches="$(kubectl logs -n "${namespace}" deploy/anyscale-operator -c operator --since=30m 2>&1 |
+    egrep -i 'error|warn|fail|exception|backoff|forbidden' |
+    tail -n 20 || true)"
   if [[ -n "${operator_log_matches}" ]]; then
     warn "Recent Anyscale operator log matches from the last 30m:"
     printf '%s\n' "${operator_log_matches}"
@@ -3935,9 +4109,9 @@ health() {
   fi
 
   cpu_head_pod="$(workspace_head_pod_name "${cpu_workspace_name}")"
-  workspace_log_matches="$(kubectl logs -n "${namespace}" "${cpu_head_pod}" -c ray --since=30m 2>&1 \
-    | egrep -i 'error|exception|traceback|fail|fatal' \
-    | tail -n 20 || true)"
+  workspace_log_matches="$(kubectl logs -n "${namespace}" "${cpu_head_pod}" -c ray --since=30m 2>&1 |
+    egrep -i 'error|exception|traceback|fail|fatal' |
+    tail -n 20 || true)"
   if [[ -n "${workspace_log_matches}" ]]; then
     warn "Recent CPU workspace ray log matches from the last 30m:"
     printf '%s\n' "${workspace_log_matches}"
@@ -4000,7 +4174,7 @@ bastion_tunnel() {
             port="$2"
             shift 2
             ;;
-          --help|-h)
+          --help | -h)
             cat <<'USAGE'
 Usage:
   ./scripts/setup.sh bastion-tunnel start [--port 64430]
@@ -4030,7 +4204,7 @@ USAGE
         else
           listener_pid="$(first_listener_pid "${port}" 2>/dev/null || true)"
           if [[ -n "${listener_pid}" ]]; then
-            printf '%s\n' "${listener_pid}" > "${pidfile}"
+            printf '%s\n' "${listener_pid}" >"${pidfile}"
             pid="${listener_pid}"
           fi
           log "Bastion tunnel already running on 127.0.0.1:${port} (pid ${pid})"
@@ -4060,7 +4234,7 @@ USAGE
       [[ -n "${rg}" && -n "${cluster}" && -n "${bastion_rg}" && -n "${bastion_name}" && -n "${cluster_id}" ]] || die "Missing Terraform outputs required for the Bastion tunnel."
 
       ensure_bastion_extensions
-      : > "${logfile}"
+      : >"${logfile}"
 
       log "Starting Bastion tunnel to ${cluster} on 127.0.0.1:${port}"
       nohup az network bastion tunnel \
@@ -4068,10 +4242,10 @@ USAGE
         --name "${bastion_name}" \
         --target-resource-id "${cluster_id}" \
         --resource-port 443 \
-        --port "${port}" > "${logfile}" 2>&1 &
+        --port "${port}" >"${logfile}" 2>&1 &
       launcher_pid="$!"
 
-      printf '%s\n' "${port}" > "${portfile}"
+      printf '%s\n' "${port}" >"${portfile}"
 
       if ! wait_for_local_listener "${port}" 30; then
         kill "${launcher_pid}" 2>/dev/null || true
@@ -4083,7 +4257,7 @@ USAGE
 
       listener_pid="$(first_listener_pid "${port}" 2>/dev/null || true)"
       [[ -n "${listener_pid}" ]] || die "Bastion tunnel opened on port ${port} but no listener PID was found."
-      printf '%s\n' "${listener_pid}" > "${pidfile}"
+      printf '%s\n' "${listener_pid}" >"${pidfile}"
 
       log "Bastion tunnel ready on 127.0.0.1:${port} (pid ${listener_pid})"
       printf 'export ANYSCALE_BASTION_PORT=%s\n' "${port}"
@@ -4094,7 +4268,7 @@ USAGE
       port="$(cat "${portfile}" 2>/dev/null || true)"
       if [[ -n "${port}" ]] && listener_is_ready "${port}" && port_listeners_are_bastion_tunnels "${port}"; then
         pid="$(first_listener_pid "${port}" 2>/dev/null || true)"
-        [[ -n "${pid}" ]] && printf '%s\n' "${pid}" > "${pidfile}"
+        [[ -n "${pid}" ]] && printf '%s\n' "${pid}" >"${pidfile}"
         printf 'status=running\n'
         printf 'pid=%s\n' "${pid}"
         printf 'port=%s\n' "${port}"
@@ -4159,7 +4333,7 @@ kubeconfig_bastion() {
         export_line=true
         shift
         ;;
-      --help|-h)
+      --help | -h)
         cat <<'USAGE'
 Usage:
   ./scripts/setup.sh kubeconfig-bastion [--admin] [--print-path|--export]
@@ -4227,7 +4401,7 @@ USAGE
       next
     }
     { print }
-  ' "${kubeconfig_file}" > "${tmp_file}"
+  ' "${kubeconfig_file}" >"${tmp_file}"
   mv "${tmp_file}" "${kubeconfig_file}"
 
   if [[ "${admin}" != true ]]; then
@@ -4351,7 +4525,7 @@ print_job_progress() {
   if [[ -f "${state_file}" ]] && [[ "$(cat "${state_file}")" == "${status_snapshot}" ]]; then
     return 0
   fi
-  printf '%s\n' "${status_snapshot}" > "${state_file}"
+  printf '%s\n' "${status_snapshot}" >"${state_file}"
 
   log "Waiting on job/${job_name}: active=${active:-0} succeeded=${succeeded:-0} failed=${failed:-0} pod=${pod_name:-none} phase=${pod_phase:-Unknown} node=${node_name:-pending}"
 
@@ -4715,17 +4889,18 @@ validate_submitter_storage_access() {
   probe_file="$(mktemp "${TMPDIR:-/tmp}/anyscale-submit-storage.XXXXXX")"
   blob_name="submitter-storage-smoke-$(date -u +%Y%m%dT%H%M%SZ).txt"
 
-  printf 'SUBMITTER_STORAGE_OK\n' > "${probe_file}"
+  printf 'SUBMITTER_STORAGE_OK\n' >"${probe_file}"
 
   for host in "${blob_host}" "${dfs_host}"; do
-    resolved_ip="$(python3 - "${host}" <<'PY'
+    resolved_ip="$(
+      python3 - "${host}" <<'PY'
 import socket
 import sys
 
 infos = socket.getaddrinfo(sys.argv[1], 443, type=socket.SOCK_STREAM)
 print(infos[0][4][0])
 PY
-)"
+    )"
     [[ -n "${resolved_ip}" ]] || die "Could not resolve ${host} from the submitter machine. Private DNS must be available before local anyscale job submit uploads can work."
     is_private_ip "${resolved_ip}" || die "${host} resolved to ${resolved_ip}, which is not a private address. Run from an in-VNet jump host with private DNS before submitting local working directories."
     log "${host} resolves privately to ${resolved_ip}"
@@ -4766,7 +4941,8 @@ submitter_storage_private_dns_ready() {
   [[ -n "${storage_account}" ]] || return 1
 
   for host in "${storage_account}.blob.core.windows.net" "${storage_account}.dfs.core.windows.net"; do
-    resolved_ip="$(python3 - "${host}" <<'PY'
+    resolved_ip="$(
+      python3 - "${host}" <<'PY'
 import socket
 import sys
 
@@ -4776,7 +4952,7 @@ except OSError:
     raise SystemExit(1)
 print(infos[0][4][0])
 PY
-)"
+    )"
     [[ -n "${resolved_ip}" ]] || return 1
     is_private_ip "${resolved_ip}" || return 1
   done
@@ -4835,7 +5011,7 @@ validate_gateway_tls_lifecycle() {
   start_epoch="$(date +%s)"
   while ! kubectl -n "${namespace}" get secret "${primary_secret}" >/dev/null 2>&1; do
     now_epoch="$(date +%s)"
-    if (( now_epoch - start_epoch >= primary_wait_seconds )); then
+    if ((now_epoch - start_epoch >= primary_wait_seconds)); then
       warn "Primary Anyscale certificate secret ${namespace}/${primary_secret} is not present after ${primary_wait_seconds}s. The Anyscale control plane provisions this lazily on first workspace activation; this is expected on a fresh deploy and is not a hard failure."
       kubectl -n "${namespace}" describe gateway "${gateway_name}" || true
       return 0
@@ -4858,7 +5034,7 @@ validate_gateway_tls_lifecycle() {
     start_epoch="$(date +%s)"
     while ! kubectl -n "${namespace}" get secret "${service_secret}" >/dev/null 2>&1; do
       now_epoch="$(date +%s)"
-      if (( now_epoch - start_epoch >= 600 )); then
+      if ((now_epoch - start_epoch >= 600)); then
         die "Service certificate secret ${namespace}/${service_secret} did not appear within 10m after service deployment."
       fi
       log "Waiting for service certificate secret ${namespace}/${service_secret}"
@@ -5004,7 +5180,8 @@ wait_for_httproute_parent_accepted() {
 
   while true; do
     route_json="$(kubectl -n "${namespace}" get httproute "${route_name}" -o json 2>/dev/null || true)"
-    if route_status="$(ROUTE_JSON="${route_json}" python3 - "${parent_namespace}" "${parent_name}" <<'PY'
+    if route_status="$(
+      ROUTE_JSON="${route_json}" python3 - "${parent_namespace}" "${parent_name}" <<'PY'
 import json
 import os
 import sys
@@ -5032,13 +5209,13 @@ for parent in route.get("status", {}).get("parents", []):
 print("; ".join(messages) if messages else "Accepted condition not reported yet")
 raise SystemExit(1)
 PY
-)"; then
+    )"; then
       log "HTTPRoute ${namespace}/${route_name} is accepted by Gateway ${parent_namespace}/${parent_name}."
       return 0
     fi
 
     now_epoch="$(date +%s)"
-    if (( now_epoch - start_epoch >= timeout_seconds )); then
+    if ((now_epoch - start_epoch >= timeout_seconds)); then
       kubectl -n "${namespace}" get httproute "${route_name}" -o yaml || true
       die "HTTPRoute ${namespace}/${route_name} was not accepted by Gateway ${parent_namespace}/${parent_name} within ${timeout}: ${route_status}"
     fi
@@ -5058,8 +5235,8 @@ validate_gpu() {
   gpu_workspace_worker="$(kubectl get pods -n "${TF_VAR_anyscale_operator_namespace}" \
     -l 'app.kubernetes.io/name=aks-gpu-workspace,ray-node-type=worker' \
     --request-timeout=15s \
-    -o json 2>/dev/null \
-    | jq -r '[.items[] | select(.metadata.deletionTimestamp == null) | select(.status.phase == "Running") | select(any(.status.conditions[]?; .type == "Ready" and .status == "True")) | select(.spec.nodeName | startswith("aks-gput4-"))] | sort_by(.metadata.creationTimestamp) | last | .metadata.name // empty' || true)"
+    -o json 2>/dev/null |
+    jq -r '[.items[] | select(.metadata.deletionTimestamp == null) | select(.status.phase == "Running") | select(any(.status.conditions[]?; .type == "Ready" and .status == "True")) | select(.spec.nodeName | startswith("aks-gput4-"))] | sort_by(.metadata.creationTimestamp) | last | .metadata.name // empty' || true)"
   if [[ -n "${gpu_workspace_worker}" ]]; then
     log "Using existing GPU workspace worker ${gpu_workspace_worker} for nvidia-smi validation."
     run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_WORKSPACE_COMMAND_SECONDS}" \
@@ -5165,8 +5342,8 @@ validate_observability() {
   container_rows="$(jq -r 'def n: tonumber? // 0; if type == "array" then (.[0].Records? | n) else (.tables[0].rows[0][0] | n) end' <<<"${container_json}")"
   [[ "${container_rows}" =~ ^[0-9]+$ && "${container_rows}" -gt 0 ]] || die "ContainerLogV2 has no records yet. Run this again after Azure Monitor ingestion catches up."
 
-  diagnostic_settings_count="$(terraform output -json private_mode_validation 2>/dev/null \
-    | jq -r '[.. | objects | .diagnostic_settings_enabled? // empty | select(. == true)] | length' 2>/dev/null || true)"
+  diagnostic_settings_count="$(terraform output -json private_mode_validation 2>/dev/null |
+    jq -r '[.. | objects | .diagnostic_settings_enabled? // empty | select(. == true)] | length' 2>/dev/null || true)"
   [[ "${diagnostic_settings_count}" =~ ^[0-9]+$ ]] || diagnostic_settings_count=0
   if [[ "${diagnostic_settings_count}" -gt 0 ]]; then
     log "Querying diagnostic tables in Log Analytics"
@@ -5190,7 +5367,7 @@ validate_focused() {
         include_observability=false
         shift
         ;;
-      --help|-h)
+      --help | -h)
         cat <<'USAGE'
 Usage:
   ./scripts/setup.sh validate-focused
@@ -5264,7 +5441,7 @@ write_anyscale_compute_config_file() {
 
   case "${profile}" in
     mixed)
-      cat > "${file_path}" <<EOF
+      cat >"${file_path}" <<EOF
 cloud: ${ANYSCALE_CLOUD_NAME}
 head_node:
   required_resources:
@@ -5311,7 +5488,7 @@ worker_nodes:
 EOF
       ;;
     cpu)
-      cat > "${file_path}" <<EOF
+      cat >"${file_path}" <<EOF
 cloud: ${ANYSCALE_CLOUD_NAME}
 head_node:
   required_resources:
@@ -5335,7 +5512,7 @@ worker_nodes:
 EOF
       ;;
     gpu)
-      cat > "${file_path}" <<EOF
+      cat >"${file_path}" <<EOF
 cloud: ${ANYSCALE_CLOUD_NAME}
 head_node:
   required_resources:
@@ -5434,14 +5611,14 @@ ensure_anyscale_compute_config() {
 
   if get_output="$(run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS}" \
     "${cli_bin}" compute-config get \
-      --name "${compute_config_name}" \
-      --cloud-name "${ANYSCALE_CLOUD_NAME}" 2>&1)"; then
+    --name "${compute_config_name}" \
+    --cloud-name "${ANYSCALE_CLOUD_NAME}" 2>&1)"; then
     desired_worker_min_nodes="$(anyscale_compute_config_worker_min_nodes_signature_from_file "${config_file}")"
     current_worker_min_nodes="$(anyscale_compute_config_worker_min_nodes_signature_from_output "${get_output}")"
-    if grep -q 'required_resources' <<<"${get_output}" \
-      && ! grep -Eq 'instance_type:|14CPU-56GB-CPU|8CPU-32GB-1xT4-AKS' <<<"${get_output}" \
-      && [[ "${current_worker_min_nodes}" == "${desired_worker_min_nodes}" ]] \
-      && anyscale_compute_config_output_matches_profile "${get_output}" "${profile}"; then
+    if grep -q 'required_resources' <<<"${get_output}" &&
+      ! grep -Eq 'instance_type:|14CPU-56GB-CPU|8CPU-32GB-1xT4-AKS' <<<"${get_output}" &&
+      [[ "${current_worker_min_nodes}" == "${desired_worker_min_nodes}" ]] &&
+      anyscale_compute_config_output_matches_profile "${get_output}" "${profile}"; then
       log "Using existing Anyscale declarative compute config ${compute_config_name}"
       return 0
     fi
@@ -5452,8 +5629,8 @@ ensure_anyscale_compute_config() {
 
   run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS}" \
     "${cli_bin}" compute-config create \
-      --name "${compute_config_name}" \
-      --config-file "${config_file}" >/dev/null
+    --name "${compute_config_name}" \
+    --config-file "${config_file}" >/dev/null
 }
 
 anyscale_compute_config_version_name() {
@@ -5463,8 +5640,8 @@ anyscale_compute_config_version_name() {
 
   get_output="$(run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS}" \
     "${cli_bin}" compute-config get \
-      --name "${compute_config_name}" \
-      --cloud-name "${ANYSCALE_CLOUD_NAME}" 2>&1)"
+    --name "${compute_config_name}" \
+    --cloud-name "${ANYSCALE_CLOUD_NAME}" 2>&1)"
 
   awk -F': ' '/^name:/ {print $2; exit}' <<<"${get_output}"
 }
@@ -5542,22 +5719,23 @@ get_anyscale_cloud_metadata() {
   for ((attempt = 1; attempt <= attempts; attempt++)); do
     if cloud_output="$(ANYSCALE_HOST="${ANYSCALE_HOST:-$(default_anyscale_host)}" \
       run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS}" \
-        "${cli_bin}" cloud get \
-          --name "${ANYSCALE_CLOUD_NAME}" 2>&1)"; then
+      "${cli_bin}" cloud get \
+      --name "${ANYSCALE_CLOUD_NAME}" 2>&1)" &&
+      grep -q '^id: ' <<<"${cloud_output}"; then
       printf '%s\n' "${cloud_output}"
       return 0
     fi
 
     if list_output="$(ANYSCALE_HOST="${ANYSCALE_HOST:-$(default_anyscale_host)}" \
       run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS}" \
-        "${cli_bin}" cloud list \
-          --name "${ANYSCALE_CLOUD_NAME}" \
-          --max-items 1 \
-          --page-size 1 \
-          --no-interactive \
-          --json 2>&1)" \
-      && list_cloud_id="$(jq -r '.[0].id // empty' <<<"${list_output}" 2>/dev/null)" \
-      && [[ -n "${list_cloud_id}" ]]; then
+      "${cli_bin}" cloud list \
+      --name "${ANYSCALE_CLOUD_NAME}" \
+      --max-items 1 \
+      --page-size 1 \
+      --no-interactive \
+      --json 2>/dev/null)" &&
+      list_cloud_id="$(jq -r '.[0].id // empty' <<<"${list_output}" 2>/dev/null)" &&
+      [[ -n "${list_cloud_id}" ]]; then
       printf 'id: %s\n' "${list_cloud_id}"
       return 0
     fi
@@ -5577,7 +5755,7 @@ ensure_anyscale_azure_cloud_dns_alias() {
   local cli_bin="$1"
   local cloud_output cloud_id host_label generic_host azure_host endpoint_source_host
   local coredns_block patch_payload certificate_names=""
-  local operator_pod=""
+  local operator_pod="" operator_namespace private_ip privatelink_json resolved_in_cluster
   local tls_verified_ip=""
   local -a azure_host_ips=()
   local -a resolved_ips=()
@@ -5589,6 +5767,28 @@ ensure_anyscale_azure_cloud_dns_alias() {
   host_label="${cloud_id//_/-}"
   generic_host="${host_label}.anyscale-cloud.dev"
   azure_host="${host_label}.azure.anyscale-cloud.dev"
+  operator_namespace="${TF_VAR_anyscale_operator_namespace}"
+  operator_pod="$(kubectl get pods -n "${operator_namespace}" -l app=anyscale-operator -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+
+  privatelink_json="$(terraform_output_json anyscale_privatelink 2>/dev/null || true)"
+  private_ip="$(jq -r 'select(.enabled == true) | .private_ip // empty' <<<"${privatelink_json}" 2>/dev/null || true)"
+  if [[ -n "${private_ip}" ]]; then
+    if kubectl get configmap coredns-custom -n kube-system -o json |
+      jq -e '.data["anyscale-azure-cloud.server"] != null' >/dev/null 2>&1; then
+      kubectl patch configmap coredns-custom -n kube-system --type json \
+        -p '[{"op":"remove","path":"/data/anyscale-azure-cloud.server"}]' >/dev/null
+      kubectl rollout restart deployment coredns -n kube-system >/dev/null
+      kubectl rollout status deployment coredns -n kube-system --timeout=300s >/dev/null
+    fi
+
+    [[ -n "${operator_pod}" ]] || die "Anyscale operator pod is unavailable for Private Link DNS validation."
+    resolved_in_cluster="$(kubectl exec -n "${operator_namespace}" "${operator_pod}" -c vector -- getent hosts "${azure_host}" 2>/dev/null |
+      awk '{print $1}' | head -n 1)"
+    [[ "${resolved_in_cluster}" == "${private_ip}" ]] ||
+      die "Anyscale cloud endpoint ${azure_host} resolved to ${resolved_in_cluster:-nothing} in-cluster, expected Private Endpoint ${private_ip}."
+    log "Anyscale cloud endpoint ${azure_host} resolves in-cluster to the configured Private Endpoint."
+    return 0
+  fi
 
   while IFS= read -r ip; do
     [[ -n "${ip}" ]] && azure_host_ips+=("${ip}")
@@ -5617,8 +5817,7 @@ ensure_anyscale_azure_cloud_dns_alias() {
     die "Anyscale cloud endpoint ${azure_host} is not usable: ${endpoint_source_host} resolves to ${resolved_ips[*]}, but the presented certificate names (${certificate_names:-unknown}) do not match ${azure_host}. CoreDNS aliasing would still fail TLS hostname verification; this must be fixed by Anyscale's Azure endpoint/certificate provisioning."
   fi
 
-  operator_pod="$(kubectl get pods -n anyscale-operator -l app=anyscale-operator -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
-  if [[ -n "${operator_pod}" ]] && kubectl exec -n anyscale-operator "${operator_pod}" -c operator -- sh -c "getent hosts ${azure_host} >/dev/null" >/dev/null 2>&1; then
+  if [[ -n "${operator_pod}" ]] && kubectl exec -n "${operator_namespace}" "${operator_pod}" -c vector -- getent hosts "${azure_host}" >/dev/null 2>&1; then
     log "Anyscale cloud endpoint ${azure_host} already resolves in-cluster and presents a matching certificate."
     return 0
   fi
@@ -5657,7 +5856,7 @@ ensure_anyscale_azure_cloud_dns_alias() {
   kubectl rollout status deployment coredns -n kube-system --timeout=300s >/dev/null
 
   if [[ -n "${operator_pod}" ]]; then
-    kubectl exec -n anyscale-operator "${operator_pod}" -c operator -- sh -c "getent hosts ${azure_host} >/dev/null" >/dev/null 2>&1 || true
+    kubectl exec -n "${operator_namespace}" "${operator_pod}" -c vector -- getent hosts "${azure_host}" >/dev/null 2>&1 || true
   fi
 
   log "Installed CoreDNS alias ${azure_host} -> ${endpoint_source_host} (${resolved_ips[*]}), validated via ${tls_verified_ip}."
@@ -5687,18 +5886,18 @@ write_anyscale_workspace_update_file() {
     else
       printf 'env_vars: {}\n'
     fi
-  } > "${file_path}"
+  } >"${file_path}"
 }
 
 normalize_anyscale_workspace_status() {
   local raw_status="$1"
 
-  printf '%s\n' "${raw_status}" \
-    | tail -n 1 \
-    | sed -E 's/'$'\033''\[[0-9;]*[A-Za-z]//g' \
-    | sed -E 's/^.*\)[[:space:]]*//' \
-    | tr -d '\r' \
-    | awk '{$1=$1; print}'
+  printf '%s\n' "${raw_status}" |
+    tail -n 1 |
+    sed -E 's/'$'\033''\[[0-9;]*[A-Za-z]//g' |
+    sed -E 's/^.*\)[[:space:]]*//' |
+    tr -d '\r' |
+    awk '{$1=$1; print}'
 }
 
 require_positive_integer_arg() {
@@ -5711,9 +5910,9 @@ require_positive_integer_arg() {
 workspace_wait_sleep_seconds() {
   local attempt="$1"
 
-  if (( attempt <= 6 )); then
+  if ((attempt <= 6)); then
     printf '5\n'
-  elif (( attempt <= 12 )); then
+  elif ((attempt <= 12)); then
     printf '10\n'
   else
     printf '15\n'
@@ -5725,22 +5924,23 @@ wait_for_anyscale_workspace_running() {
   local cli_bin="$2"
   local wait_log="$3"
   local deadline current_epoch raw_status current_status previous_status="" attempt=1 sleep_seconds
+  local startup_propagation_attempts=6
 
   ANYSCALE_WORKSPACE_WAIT_RESULT=""
-  : > "${wait_log}"
-  deadline=$(( $(date +%s) + SETUP_TIMEOUT_ANYSCALE_WORKSPACE_WAIT_SECONDS ))
+  : >"${wait_log}"
+  deadline=$(($(date +%s) + SETUP_TIMEOUT_ANYSCALE_WORKSPACE_WAIT_SECONDS))
 
   while true; do
     if ! raw_status="$(run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS}" \
       "${cli_bin}" workspace_v2 status \
-        --name "${workspace_name}" \
-        --cloud "${ANYSCALE_CLOUD_NAME}" 2>&1)"; then
+      --name "${workspace_name}" \
+      --cloud "${ANYSCALE_CLOUD_NAME}" 2>&1)"; then
       printf '%s\n' "${raw_status}" | tee -a "${wait_log}"
       return 1
     fi
 
     current_status="$(normalize_anyscale_workspace_status "${raw_status}")"
-    printf '%s\n' "${raw_status}" >> "${wait_log}"
+    printf '%s\n' "${raw_status}" >>"${wait_log}"
 
     if [[ -z "${current_status}" ]]; then
       current_status="UNKNOWN"
@@ -5756,7 +5956,15 @@ wait_for_anyscale_workspace_running() {
         ANYSCALE_WORKSPACE_WAIT_RESULT="${current_status}"
         return 0
         ;;
-      TERMINATED|TERMINATING|CREATE_FAILED|FAILED|ERROR)
+      TERMINATED)
+        if ((attempt <= startup_propagation_attempts)); then
+          warn "Workspace ${workspace_name} still reports TERMINATED while the start request propagates (${attempt}/${startup_propagation_attempts})."
+        else
+          ANYSCALE_WORKSPACE_WAIT_RESULT="${current_status}"
+          return 1
+        fi
+        ;;
+      TERMINATING | CREATE_FAILED | FAILED | ERROR)
         ANYSCALE_WORKSPACE_WAIT_RESULT="${current_status}"
         return 1
         ;;
@@ -5769,7 +5977,7 @@ wait_for_anyscale_workspace_running() {
     fi
 
     current_epoch=$(date +%s)
-    if (( current_epoch >= deadline )); then
+    if ((current_epoch >= deadline)); then
       ANYSCALE_WORKSPACE_WAIT_RESULT="Timed out waiting for RUNNING; last observed state=${current_status}"
       return 1
     fi
@@ -5792,21 +6000,21 @@ wait_for_anyscale_workspace_running_attempts() {
   require_positive_integer_arg "--interval-seconds" "${interval_seconds}"
 
   ANYSCALE_WORKSPACE_WAIT_RESULT=""
-  : > "${wait_log}"
+  : >"${wait_log}"
 
   for ((attempt = 1; attempt <= max_attempts; attempt++)); do
     if ! raw_status="$(run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS}" \
       "${cli_bin}" workspace_v2 status \
-        --name "${workspace_name}" \
-        --cloud "${ANYSCALE_CLOUD_NAME}" 2>&1)"; then
-      printf 'attempt=%s/%s\n' "${attempt}" "${max_attempts}" >> "${wait_log}"
+      --name "${workspace_name}" \
+      --cloud "${ANYSCALE_CLOUD_NAME}" 2>&1)"; then
+      printf 'attempt=%s/%s\n' "${attempt}" "${max_attempts}" >>"${wait_log}"
       printf '%s\n' "${raw_status}" | tee -a "${wait_log}"
       return 1
     fi
 
     current_status="$(normalize_anyscale_workspace_status "${raw_status}")"
-    printf 'attempt=%s/%s\n' "${attempt}" "${max_attempts}" >> "${wait_log}"
-    printf '%s\n' "${raw_status}" >> "${wait_log}"
+    printf 'attempt=%s/%s\n' "${attempt}" "${max_attempts}" >>"${wait_log}"
+    printf '%s\n' "${raw_status}" >>"${wait_log}"
 
     if [[ -z "${current_status}" ]]; then
       current_status="UNKNOWN"
@@ -5822,7 +6030,7 @@ wait_for_anyscale_workspace_running_attempts() {
         ANYSCALE_WORKSPACE_WAIT_RESULT="${current_status}"
         return 0
         ;;
-      TERMINATED|TERMINATING|CREATE_FAILED|FAILED|ERROR)
+      TERMINATED | TERMINATING | CREATE_FAILED | FAILED | ERROR)
         ANYSCALE_WORKSPACE_WAIT_RESULT="${current_status}"
         return 1
         ;;
@@ -5834,7 +6042,7 @@ wait_for_anyscale_workspace_running_attempts() {
       return 0
     fi
 
-    if (( attempt < max_attempts )); then
+    if ((attempt < max_attempts)); then
       sleep "${interval_seconds}"
     fi
   done
@@ -5881,21 +6089,21 @@ wait_for_anyscale_workspace_terminated_attempts() {
   require_positive_integer_arg "--interval-seconds" "${interval_seconds}"
 
   ANYSCALE_WORKSPACE_WAIT_RESULT=""
-  : > "${wait_log}"
+  : >"${wait_log}"
 
   for ((attempt = 1; attempt <= max_attempts; attempt++)); do
     if ! raw_status="$(run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS}" \
       "${cli_bin}" workspace_v2 status \
-        --name "${workspace_name}" \
-        --cloud "${ANYSCALE_CLOUD_NAME}" 2>&1)"; then
-      printf 'attempt=%s/%s\n' "${attempt}" "${max_attempts}" >> "${wait_log}"
+      --name "${workspace_name}" \
+      --cloud "${ANYSCALE_CLOUD_NAME}" 2>&1)"; then
+      printf 'attempt=%s/%s\n' "${attempt}" "${max_attempts}" >>"${wait_log}"
       printf '%s\n' "${raw_status}" | tee -a "${wait_log}"
       return 1
     fi
 
     current_status="$(normalize_anyscale_workspace_status "${raw_status}")"
-    printf 'attempt=%s/%s\n' "${attempt}" "${max_attempts}" >> "${wait_log}"
-    printf '%s\n' "${raw_status}" >> "${wait_log}"
+    printf 'attempt=%s/%s\n' "${attempt}" "${max_attempts}" >>"${wait_log}"
+    printf '%s\n' "${raw_status}" >>"${wait_log}"
 
     if [[ -z "${current_status}" ]]; then
       current_status="UNKNOWN"
@@ -5911,7 +6119,7 @@ wait_for_anyscale_workspace_terminated_attempts() {
       return 0
     fi
 
-    if (( attempt < max_attempts )); then
+    if ((attempt < max_attempts)); then
       sleep "${interval_seconds}"
     fi
   done
@@ -5928,8 +6136,8 @@ workspace_head_pod_name() {
   head_pod_name="$(kubectl get pods -n "${namespace}" \
     -l "app.kubernetes.io/name=${workspace_name},ray-node-type=head" \
     --request-timeout=15s \
-    -o json 2>/dev/null \
-    | jq -r '[.items[] | select(.metadata.deletionTimestamp == null) | select(.status.phase == "Running") | select(any(.status.conditions[]?; .type == "Ready" and .status == "True"))] | sort_by(.metadata.creationTimestamp) | last | .metadata.name // empty' || true)"
+    -o json 2>/dev/null |
+    jq -r '[.items[] | select(.metadata.deletionTimestamp == null) | select(.status.phase == "Running") | select(any(.status.conditions[]?; .type == "Ready" and .status == "True"))] | sort_by(.metadata.creationTimestamp) | last | .metadata.name // empty' || true)"
 
   [[ -n "${head_pod_name}" ]] || die "Could not find a Ray head pod for workspace ${workspace_name} in namespace ${namespace}."
   printf '%s\n' "${head_pod_name}"
@@ -5942,8 +6150,8 @@ wait_for_workspace_runtime_stable() {
   local namespace deadline current_epoch snapshot_json terminating_count head_name worker_line stable_count=0 previous_summary="" sleep_seconds
 
   namespace="${TF_VAR_anyscale_operator_namespace}"
-  deadline=$(( $(date +%s) + SETUP_TIMEOUT_ANYSCALE_WORKSPACE_WAIT_SECONDS ))
-  : > "${wait_log}.runtime-stable"
+  deadline=$(($(date +%s) + SETUP_TIMEOUT_ANYSCALE_WORKSPACE_WAIT_SECONDS))
+  : >"${wait_log}.runtime-stable"
 
   while true; do
     snapshot_json="$(kubectl get pods -n "${namespace}" \
@@ -5954,12 +6162,12 @@ wait_for_workspace_runtime_stable() {
     head_name="$(jq -r '[.items[] | select(.metadata.labels["ray-node-type"] == "head") | select(.metadata.deletionTimestamp == null) | select(.status.phase == "Running") | select(any(.status.conditions[]?; .type == "Ready" and .status == "True"))] | sort_by(.metadata.creationTimestamp) | last | .metadata.name // empty' <<<"${snapshot_json}")"
     worker_line="$(jq -r --arg prefix "${worker_node_prefix}" '[.items[] | select(.metadata.labels["ray-node-type"] == "worker") | select(.metadata.deletionTimestamp == null) | select(.status.phase == "Running") | select(any(.status.conditions[]?; .type == "Ready" and .status == "True")) | select(.spec.nodeName | startswith($prefix))] | sort_by(.metadata.creationTimestamp) | last | if . == null then "" else [.metadata.name, .spec.nodeName, .status.podIP] | @tsv end' <<<"${snapshot_json}")"
 
-    printf 'terminating=%s head=%s worker=%s\n' "${terminating_count}" "${head_name}" "${worker_line}" >> "${wait_log}.runtime-stable"
+    printf 'terminating=%s head=%s worker=%s\n' "${terminating_count}" "${head_name}" "${worker_line}" >>"${wait_log}.runtime-stable"
 
-    if [[ "${terminating_count}" == "0" && -n "${head_name}" && -n "${worker_line}" ]] \
-      && anyscale_workspace_runtime_ready_on_cluster "${workspace_name}"; then
+    if [[ "${terminating_count}" == "0" && -n "${head_name}" && -n "${worker_line}" ]] &&
+      anyscale_workspace_runtime_ready_on_cluster "${workspace_name}"; then
       stable_count=$((stable_count + 1))
-      if (( stable_count >= 2 )); then
+      if ((stable_count >= 2)); then
         log "Workspace ${workspace_name} runtime is stable with worker on ${worker_node_prefix}*."
         return 0
       fi
@@ -5974,11 +6182,11 @@ wait_for_workspace_runtime_stable() {
     fi
 
     current_epoch=$(date +%s)
-    if (( current_epoch >= deadline )); then
+    if ((current_epoch >= deadline)); then
       die "Workspace ${workspace_name} runtime did not become stable. See ${wait_log}.runtime-stable."
     fi
 
-    if (( stable_count > 0 )); then
+    if ((stable_count > 0)); then
       sleep_seconds=5
     else
       sleep_seconds=15
@@ -6045,7 +6253,7 @@ run_workspace_cpu_probe_with_retries() {
 
   require_positive_integer_arg "cpu-probe-max-attempts" "${max_attempts}"
 
-  for ((probe_attempt=1; probe_attempt<=max_attempts; probe_attempt++)); do
+  for ((probe_attempt = 1; probe_attempt <= max_attempts; probe_attempt++)); do
     log "Ray num_cpus=1 probe attempt ${probe_attempt}/${max_attempts} on ${workspace_name}"
     probe_exit=0
     run_workspace_cpu_probe_with_timeout "${workspace_name}" "${timeout_seconds}" 2>&1 | tee "${cpu_ray_log}" || probe_exit=$?
@@ -6073,6 +6281,7 @@ anyscale_workspaces_register() {
   local cpu_compute_config_file gpu_compute_config_file
   local cpu_create_log cpu_start_log cpu_wait_log cpu_validate_log
   local gpu_create_log gpu_start_log gpu_wait_log gpu_validate_log
+  local gpu_enabled=false
 
   load_env
   sync_anyscale_cli_env
@@ -6081,6 +6290,10 @@ anyscale_workspaces_register() {
   require_cluster_kubectl_access
   require_env_var ANYSCALE_CLOUD_NAME
   require_env_var ANYSCALE_CLOUD_DEPLOYMENT_ID
+
+  if gpu_workloads_enabled; then
+    gpu_enabled=true
+  fi
 
   cli_bin="$(anyscale_cli_bin)"
   namespace="${TF_VAR_anyscale_operator_namespace}"
@@ -6119,15 +6332,15 @@ anyscale_workspaces_register() {
     create_status=0
     if run_with_timeout "${workspace_lifecycle_timeout}" \
       "${cli_bin}" workspace_v2 status \
-        --name "${workspace_name}" \
-        --cloud "${ANYSCALE_CLOUD_NAME}" >/dev/null 2>&1; then
+      --name "${workspace_name}" \
+      --cloud "${ANYSCALE_CLOUD_NAME}" >/dev/null 2>&1; then
       log "Workspace ${workspace_name} already exists"
       get_log="${CACHE_DIR}/${workspace_name}.get.log"
       if ! workspace_json="$(run_with_timeout "${workspace_inspect_timeout}" \
         "${cli_bin}" workspace_v2 get \
-          --name "${workspace_name}" \
-          --cloud "${ANYSCALE_CLOUD_NAME}" \
-          --json 2>&1)"; then
+        --name "${workspace_name}" \
+        --cloud "${ANYSCALE_CLOUD_NAME}" \
+        --json 2>&1)"; then
         printf '%s\n' "${workspace_json}" | tee "${get_log}"
         log "Workspace ${workspace_name} metadata lookup did not complete within ${workspace_inspect_timeout}s. Skipping compute-config drift check; start and runtime validation will still run."
         return 0
@@ -6138,9 +6351,9 @@ anyscale_workspaces_register() {
       current_image_uri="$(jq -r '.config.image_uri // empty' <<<"${workspace_json}")"
       target_compute_config="$(anyscale_compute_config_version_name "${compute_config_name}" "${cli_bin}")"
 
-      if [[ -n "${workspace_id}" && -n "${target_compute_config}" ]] \
-        && { [[ "${current_compute_config}" != "${target_compute_config}" ]] \
-          || [[ -n "${target_image_uri}" && "${current_image_uri}" != "${target_image_uri}" ]]; }; then
+      if [[ -n "${workspace_id}" && -n "${target_compute_config}" ]] &&
+        { [[ "${current_compute_config}" != "${target_compute_config}" ]] ||
+          [[ -n "${target_image_uri}" && "${current_image_uri}" != "${target_image_uri}" ]]; }; then
         update_log="${CACHE_DIR}/${workspace_name}.update-workspace-runtime.log"
         terminate_log="${CACHE_DIR}/${workspace_name}.terminate-for-update.log"
         terminate_wait_log="${CACHE_DIR}/${workspace_name}.terminate-for-update.wait.log"
@@ -6150,8 +6363,8 @@ anyscale_workspaces_register() {
           log "Terminating workspace ${workspace_name} before runtime update"
           if ! terminate_output="$(run_with_timeout "${workspace_lifecycle_timeout}" \
             "${cli_bin}" workspace_v2 terminate \
-              --name "${workspace_name}" \
-              --cloud "${ANYSCALE_CLOUD_NAME}" 2>&1)"; then
+            --name "${workspace_name}" \
+            --cloud "${ANYSCALE_CLOUD_NAME}" 2>&1)"; then
             printf '%s\n' "${terminate_output}" | tee "${terminate_log}"
             if ! grep -Eiq 'already.*terminated|currently in state: TERMINATED' <<<"${terminate_output}"; then
               die "Workspace ${workspace_name} could not be terminated for runtime update. See ${terminate_log}."
@@ -6200,11 +6413,11 @@ anyscale_workspaces_register() {
 
     if status_output="$(run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS}" \
       "${cli_bin}" workspace_v2 status \
-        --name "${workspace_name}" \
-        --cloud "${ANYSCALE_CLOUD_NAME}" 2>&1)"; then
+      --name "${workspace_name}" \
+      --cloud "${ANYSCALE_CLOUD_NAME}" 2>&1)"; then
       workspace_status="$(normalize_anyscale_workspace_status "${status_output}")"
       [[ -n "${workspace_status}" ]] || workspace_status="UNKNOWN"
-      printf '%s\n' "${status_output}" > "${start_log}.status"
+      printf '%s\n' "${status_output}" >"${start_log}.status"
 
       case "${workspace_status}" in
         RUNNING)
@@ -6217,20 +6430,20 @@ anyscale_workspaces_register() {
           printf '%s\n' "${workspace_status}" | tee "${start_log}"
           return 0
           ;;
-        CREATE_FAILED|FAILED|ERROR)
+        CREATE_FAILED | FAILED | ERROR)
           die "Workspace ${workspace_name} is unhealthy with API status ${workspace_status}."
           ;;
-        TERMINATED|TERMINATING|UNKNOWN)
+        TERMINATED | TERMINATING | UNKNOWN)
           ;;
       esac
     else
-      printf '%s\n' "${status_output}" > "${start_log}.status"
+      printf '%s\n' "${status_output}" >"${start_log}.status"
     fi
 
     if ! start_output="$(run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_WORKSPACE_WAIT_SECONDS}" \
       "${cli_bin}" workspace_v2 start \
-        --name "${workspace_name}" \
-        --cloud "${ANYSCALE_CLOUD_NAME}" 2>&1)"; then
+      --name "${workspace_name}" \
+      --cloud "${ANYSCALE_CLOUD_NAME}" 2>&1)"; then
       printf '%s\n' "${start_output}" | tee "${start_log}"
       if ! grep -Eiq 'already.*running|currently in state: STARTING|currently in state: RUNNING' <<<"${start_output}"; then
         die "Workspace ${workspace_name} start failed. See ${start_log}."
@@ -6259,14 +6472,15 @@ anyscale_workspaces_register() {
 
     head_pod="$(workspace_head_pod_name "${workspace_name}")"
     head_node="$(kubectl get pod -n "${namespace}" "${head_pod}" --request-timeout=15s -o jsonpath='{.spec.nodeName}')"
-    deadline=$(( $(date +%s) + SETUP_TIMEOUT_ANYSCALE_WORKSPACE_WAIT_SECONDS ))
+    deadline=$(($(date +%s) + SETUP_TIMEOUT_ANYSCALE_WORKSPACE_WAIT_SECONDS))
 
     while true; do
       worker_line="$(kubectl get pods -n "${namespace}" \
         -l "app.kubernetes.io/name=${workspace_name},ray-node-type=worker" \
         --request-timeout=15s \
-        -o wide --no-headers 2>/dev/null \
-        | awk -v prefix="${worker_node_prefix}" '$3 == "Running" && $7 ~ "^"prefix {print; exit}')"
+        -o json 2>/dev/null |
+        jq -r --arg prefix "${worker_node_prefix}" \
+          '[.items[] | select(.metadata.deletionTimestamp == null) | select(.status.phase == "Running") | select(any(.status.conditions[]?; .type == "Ready" and .status == "True")) | select(.spec.nodeName | startswith($prefix))] | sort_by(.metadata.creationTimestamp) | last | if . == null then "" else [.metadata.name, .spec.nodeName, .status.podIP] | @tsv end')"
       if [[ -n "${worker_line}" ]]; then
         {
           printf 'workspace=%s\n' "${workspace_name}"
@@ -6279,7 +6493,7 @@ anyscale_workspaces_register() {
       fi
 
       current_epoch="$(date +%s)"
-      if (( current_epoch >= deadline )); then
+      if ((current_epoch >= deadline)); then
         {
           printf 'workspace=%s\n' "${workspace_name}"
           printf 'head_pod=%s\n' "${head_pod}"
@@ -6296,21 +6510,21 @@ anyscale_workspaces_register() {
 
   validate_anyscale_operator_patches
   ensure_anyscale_compute_config "${cpu_compute_config_name}" "${cli_bin}" "${cpu_compute_config_file}" "cpu"
-  ensure_anyscale_compute_config "${gpu_compute_config_name}" "${cli_bin}" "${gpu_compute_config_file}" "gpu"
-
   ensure_registered_workspace "${cpu_workspace_name}" "${cpu_compute_config_name}" "${cpu_create_log}"
-  ensure_registered_workspace "${gpu_workspace_name}" "${gpu_compute_config_name}" "${gpu_create_log}"
-
   start_workspace_for_validation "${cpu_workspace_name}" "${cpu_start_log}"
-  start_workspace_for_validation "${gpu_workspace_name}" "${gpu_start_log}"
-
   wait_for_workspace_running_or_die "${cpu_workspace_name}" "${cpu_wait_log}"
-  wait_for_workspace_running_or_die "${gpu_workspace_name}" "${gpu_wait_log}"
-
   validate_workspace_warm_capacity "${cpu_workspace_name}" "aks-cpu-" "${cpu_validate_log}"
-  validate_workspace_warm_capacity "${gpu_workspace_name}" "aks-gput4-" "${gpu_validate_log}"
 
-  log "CPU workspace ${cpu_workspace_name} and GPU workspace ${gpu_workspace_name} are registered, running, and warm on the expected node pools."
+  if [[ "${gpu_enabled}" == true ]]; then
+    ensure_anyscale_compute_config "${gpu_compute_config_name}" "${cli_bin}" "${gpu_compute_config_file}" "gpu"
+    ensure_registered_workspace "${gpu_workspace_name}" "${gpu_compute_config_name}" "${gpu_create_log}"
+    start_workspace_for_validation "${gpu_workspace_name}" "${gpu_start_log}"
+    wait_for_workspace_running_or_die "${gpu_workspace_name}" "${gpu_wait_log}"
+    validate_workspace_warm_capacity "${gpu_workspace_name}" "aks-gput4-" "${gpu_validate_log}"
+    log "CPU workspace ${cpu_workspace_name} and GPU workspace ${gpu_workspace_name} are registered, running, and warm on the expected node pools."
+  else
+    log "CPU workspace ${cpu_workspace_name} is registered, running, and warm. GPU workspace setup is skipped because no GPU node pool is configured."
+  fi
 }
 
 ###############################################################################
@@ -6456,8 +6670,8 @@ require_custom_image_acr_push_role() {
     return 0
   fi
 
-  [[ "${role_count}" -gt 0 ]] \
-    || die "Active Azure principal ${principal_id} does not have AcrPush or an equivalent push role on ${acr_name}. Grant AcrPush on the registry before local custom-image prepare."
+  [[ "${role_count}" -gt 0 ]] ||
+    die "Active Azure principal ${principal_id} does not have AcrPush or an equivalent push role on ${acr_name}. Grant AcrPush on the registry before local custom-image prepare."
 }
 
 custom_image_preflight() {
@@ -6485,8 +6699,8 @@ custom_image_preflight() {
   require_custom_image_acr_push_role "${acr_name}"
 
   if [[ "${check_token}" == true ]]; then
-    token_output="$(custom_image_acr_token "${acr_name}" 2>&1 >/dev/null)" \
-      || die "Could not get an ACR access token for ${acr_name}. Ensure Azure login is fresh, the current principal has AcrPush, and role propagation has completed. ACR output: ${token_output}"
+    token_output="$(custom_image_acr_token "${acr_name}" 2>&1 >/dev/null)" ||
+      die "Could not get an ACR access token for ${acr_name}. Ensure Azure login is fresh, the current principal has AcrPush, and role propagation has completed. ACR output: ${token_output}"
   fi
 
   printf 'CUSTOM_IMAGE_PREFLIGHT_OK image_uri=%s\n' "${image_uri}"
@@ -6512,8 +6726,8 @@ custom_image_prepare() {
   build_context="$(custom_image_build_context_dir)"
 
   log "Preparing custom image ${image_uri} with Podman."
-  token="$(custom_image_acr_token "${acr_name}" 2>&1)" \
-    || die "Could not get an ACR access token for ${acr_name}. Ensure Azure login is fresh, the current principal has AcrPush, and role propagation has completed. ACR output: ${token}"
+  token="$(custom_image_acr_token "${acr_name}" 2>&1)" ||
+    die "Could not get an ACR access token for ${acr_name}. Ensure Azure login is fresh, the current principal has AcrPush, and role propagation has completed. ACR output: ${token}"
   printf '%s' "${token}" | podman login "${acr_name}.azurecr.io" \
     --username 00000000-0000-0000-0000-000000000000 \
     --password-stdin >/dev/null
@@ -6524,8 +6738,8 @@ custom_image_prepare() {
     -t "${image_uri}" \
     "${build_context}"
 
-  podman image inspect "${image_uri}" --format '{{.Os}}/{{.Architecture}}' | grep -q '^linux/amd64$' \
-    || die "Custom image ${image_uri} was not built as linux/amd64."
+  podman image inspect "${image_uri}" --format '{{.Os}}/{{.Architecture}}' | grep -q '^linux/amd64$' ||
+    die "Custom image ${image_uri} was not built as linux/amd64."
 
   podman push "${image_uri}"
 
@@ -6534,8 +6748,8 @@ custom_image_prepare() {
     --repository "${repository_name}" \
     --query "[?@=='${ANYSCALE_CUSTOM_IMAGE_TAG}']" \
     --output tsv \
-    --only-show-errors | grep -q "${ANYSCALE_CUSTOM_IMAGE_TAG}" \
-    || die "Pushed image tag ${ANYSCALE_CUSTOM_IMAGE_TAG} was not visible in ACR repository ${repository_name}."
+    --only-show-errors | grep -q "${ANYSCALE_CUSTOM_IMAGE_TAG}" ||
+    die "Pushed image tag ${ANYSCALE_CUSTOM_IMAGE_TAG} was not visible in ACR repository ${repository_name}."
 
   printf 'CUSTOM_IMAGE_BUILD_OK image_uri=%s\n' "${image_uri}"
 }
@@ -6573,9 +6787,9 @@ custom_image_resolve_digest() {
   local acr_name="$1" repo="$2" tag="$3"
   run_with_timeout "${SETUP_TIMEOUT_AZURE_COMMAND_SECONDS}" \
     az acr repository show \
-      --name "${acr_name}" \
-      --image "${repo}:${tag}" \
-      --query digest -o tsv --only-show-errors
+    --name "${acr_name}" \
+    --image "${repo}:${tag}" \
+    --query digest -o tsv --only-show-errors
 }
 
 ensure_signing_certificate() {
@@ -6583,12 +6797,12 @@ ensure_signing_certificate() {
 
   exists="$(run_with_timeout "${SETUP_TIMEOUT_AZURE_COMMAND_SECONDS}" \
     az keyvault certificate show --vault-name "${akv_name}" --name "${cert_name}" \
-      --query name -o tsv --only-show-errors 2>/dev/null || true)"
+    --query name -o tsv --only-show-errors 2>/dev/null || true)"
   [[ -n "${exists}" ]] && return 0
 
   mkdir -p "${CACHE_DIR}/tmp"
   policy_file="$(mktemp "${CACHE_DIR}/tmp/signing-cert-policy.XXXXXX.json")"
-  cat > "${policy_file}" <<JSON
+  cat >"${policy_file}" <<JSON
 {
   "issuerParameters": {
     "name": "Self"
@@ -6618,8 +6832,11 @@ JSON
   log "Creating signing certificate ${cert_name} in private Key Vault ${akv_name}."
   run_with_timeout "${SETUP_TIMEOUT_AZURE_COMMAND_SECONDS}" \
     az keyvault certificate create --vault-name "${akv_name}" --name "${cert_name}" \
-      --policy "@${policy_file}" --only-show-errors >/dev/null \
-    || { rm -f "${policy_file}"; die "Could not create signing certificate ${cert_name} in Key Vault ${akv_name}. Ensure this principal has Key Vault Certificates Officer and reaches the private endpoint."; }
+    --policy "@${policy_file}" --only-show-errors >/dev/null ||
+    {
+      rm -f "${policy_file}"
+      die "Could not create signing certificate ${cert_name} in Key Vault ${akv_name}. Ensure this principal has Key Vault Certificates Officer and reaches the private endpoint."
+    }
   rm -f "${policy_file}"
 }
 
@@ -6628,8 +6845,8 @@ custom_image_sign() {
   load_env
   require_cmd az
   require_cmd notation
-  notation plugin ls 2>/dev/null | grep -q 'azure-kv' \
-    || die "notation azure-kv plugin not installed. Re-run scripts/bootstrap-jump-host.sh on the jump host."
+  notation plugin ls 2>/dev/null | grep -q 'azure-kv' ||
+    die "notation azure-kv plugin not installed. Re-run scripts/bootstrap-jump-host.sh on the jump host."
 
   local acr_name akv_name cert_name repo tag digest key_id image_ref acr_token
   acr_name="$(custom_image_acr_name)"
@@ -6641,8 +6858,8 @@ custom_image_sign() {
   require_custom_image_acr_private_dns "${acr_name}"
 
   log "Resolving digest for ${acr_name}.azurecr.io/${repo}:${tag}..."
-  digest="$(custom_image_resolve_digest "${acr_name}" "${repo}" "${tag}")" \
-    || die "Could not resolve the digest for ${repo}:${tag} in ${acr_name}. Run custom-image prepare (build + push) first."
+  digest="$(custom_image_resolve_digest "${acr_name}" "${repo}" "${tag}")" ||
+    die "Could not resolve the digest for ${repo}:${tag} in ${acr_name}. Run custom-image prepare (build + push) first."
   [[ -n "${digest}" ]] || die "Empty digest for ${repo}:${tag} in ${acr_name}."
 
   ensure_signing_certificate "${akv_name}" "${cert_name}"
@@ -6650,22 +6867,22 @@ custom_image_sign() {
   log "Resolving signing key id from Key Vault ${akv_name} (cert ${cert_name})..."
   key_id="$(run_with_timeout "${SETUP_TIMEOUT_AZURE_COMMAND_SECONDS}" \
     az keyvault certificate show --vault-name "${akv_name}" --name "${cert_name}" \
-      --query kid -o tsv --only-show-errors)" \
-    || die "Could not read certificate ${cert_name} from Key Vault ${akv_name}. Ensure this principal has Key Vault Certificates Officer + Crypto User."
+    --query kid -o tsv --only-show-errors)" ||
+    die "Could not read certificate ${cert_name} from Key Vault ${akv_name}. Ensure this principal has Key Vault Certificates Officer + Crypto User."
   [[ -n "${key_id}" ]] || die "Empty key id for cert ${cert_name} in ${akv_name}."
 
   image_ref="${acr_name}.azurecr.io/${repo}@${digest}"
-  acr_token="$(custom_image_acr_token "${acr_name}" 2>&1)" \
-    || die "Could not get an ACR access token for ${acr_name}. ACR output: ${acr_token}"
+  acr_token="$(custom_image_acr_token "${acr_name}" 2>&1)" ||
+    die "Could not get an ACR access token for ${acr_name}. ACR output: ${acr_token}"
   log "Signing ${image_ref} with notation (cose, azure-kv, managedid)..."
   NOTATION_USERNAME=00000000-0000-0000-0000-000000000000 NOTATION_PASSWORD="${acr_token}" \
     run_with_timeout "${SETUP_TIMEOUT_AZURE_COMMAND_SECONDS}" \
     notation sign \
-      --signature-format cose \
-      --id "${key_id}" \
-      --plugin azure-kv \
-      --plugin-config credential_type=managedid \
-      "${image_ref}"
+    --signature-format cose \
+    --id "${key_id}" \
+    --plugin azure-kv \
+    --plugin-config credential_type=managedid \
+    "${image_ref}"
 
   printf 'CUSTOM_IMAGE_SIGN_OK image_uri=%s digest=%s\n' "$(custom_image_uri)" "${digest}"
 }
@@ -6687,8 +6904,8 @@ custom_image_verify() {
 
   require_custom_image_acr_private_dns "${acr_name}"
 
-  digest="$(custom_image_resolve_digest "${acr_name}" "${repo}" "${tag}")" \
-    || die "Could not resolve the digest for ${repo}:${tag} in ${acr_name}."
+  digest="$(custom_image_resolve_digest "${acr_name}" "${repo}" "${tag}")" ||
+    die "Could not resolve the digest for ${repo}:${tag} in ${acr_name}."
   [[ -n "${digest}" ]] || die "Empty digest for ${repo}:${tag} in ${acr_name}."
 
   mkdir -p "${CACHE_DIR}/tmp"
@@ -6696,13 +6913,16 @@ custom_image_verify() {
   rm -f "${cert_pem}"
   run_with_timeout "${SETUP_TIMEOUT_AZURE_COMMAND_SECONDS}" \
     az keyvault certificate download --vault-name "${akv_name}" --name "${cert_name}" \
-      --file "${cert_pem}" --encoding PEM --only-show-errors \
-    || { rm -f "${cert_pem}"; die "Could not download cert ${cert_name} from Key Vault ${akv_name}."; }
+    --file "${cert_pem}" --encoding PEM --only-show-errors ||
+    {
+      rm -f "${cert_pem}"
+      die "Could not download cert ${cert_name} from Key Vault ${akv_name}."
+    }
   notation cert add --type ca --store "${store_name}" "${cert_pem}" || true
   rm -f "${cert_pem}"
 
   policy_file="$(mktemp "${CACHE_DIR}/tmp/trustpolicy.XXXXXX")"
-  cat > "${policy_file}" <<JSON
+  cat >"${policy_file}" <<JSON
 {
   "version": "1.0",
   "trustPolicies": [
@@ -6720,8 +6940,8 @@ JSON
   rm -f "${policy_file}"
 
   image_ref="${acr_name}.azurecr.io/${repo}@${digest}"
-  acr_token="$(custom_image_acr_token "${acr_name}" 2>&1)" \
-    || die "Could not get an ACR access token for ${acr_name}. ACR output: ${acr_token}"
+  acr_token="$(custom_image_acr_token "${acr_name}" 2>&1)" ||
+    die "Could not get an ACR access token for ${acr_name}. ACR output: ${acr_token}"
   log "Verifying signature on ${image_ref}..."
   NOTATION_USERNAME=00000000-0000-0000-0000-000000000000 NOTATION_PASSWORD="${acr_token}" \
     run_with_timeout "${SETUP_TIMEOUT_AZURE_COMMAND_SECONDS}" \
@@ -6747,8 +6967,8 @@ custom_image_sbom_referrer_digest() {
 
   for attempt in {1..12}; do
     digest="$(run_with_timeout "${SETUP_TIMEOUT_AZURE_COMMAND_SECONDS}" \
-      oras discover --artifact-type application/spdx+json --format json "${image_ref}" \
-      | jq -r '(.referrers // .manifests // []) | sort_by(.annotations["org.opencontainers.image.created"] // "") | reverse | .[0].digest // empty')" || return $?
+      oras discover --artifact-type application/spdx+json --format json "${image_ref}" |
+      jq -r '(.referrers // .manifests // []) | sort_by(.annotations["org.opencontainers.image.created"] // "") | reverse | .[0].digest // empty')" || return $?
     if [[ -n "${digest}" ]]; then
       printf '%s\n' "${digest}"
       return 0
@@ -6776,24 +6996,27 @@ custom_image_sbom() {
   require_custom_image_acr_private_dns "${acr_name}"
 
   log "Resolving digest for ${acr_name}.azurecr.io/${repo}:${tag}..."
-  digest="$(custom_image_resolve_digest "${acr_name}" "${repo}" "${tag}")" \
-    || die "Could not resolve the digest for ${repo}:${tag} in ${acr_name}. Run custom-image prepare (build + push) first."
+  digest="$(custom_image_resolve_digest "${acr_name}" "${repo}" "${tag}")" ||
+    die "Could not resolve the digest for ${repo}:${tag} in ${acr_name}. Run custom-image prepare (build + push) first."
   [[ -n "${digest}" ]] || die "Empty digest for ${repo}:${tag} in ${acr_name}."
 
   image_ref="${acr_name}.azurecr.io/${repo}@${digest}"
-  acr_token="$(custom_image_acr_token "${acr_name}" 2>&1)" \
-    || die "Could not get an ACR access token for ${acr_name}. ACR output: ${acr_token}"
+  acr_token="$(custom_image_acr_token "${acr_name}" 2>&1)" ||
+    die "Could not get an ACR access token for ${acr_name}. ACR output: ${acr_token}"
 
   mkdir -p "${CACHE_DIR}/tmp"
   sbom_file="$(mktemp "${CACHE_DIR}/tmp/custom-image-sbom.XXXXXX.spdx.json")"
 
   log "Generating SPDX SBOM for ${image_ref} with syft..."
   SYFT_REGISTRY_AUTH_AUTHORITY="${acr_name}.azurecr.io" \
-  SYFT_REGISTRY_AUTH_USERNAME=00000000-0000-0000-0000-000000000000 \
-  SYFT_REGISTRY_AUTH_PASSWORD="${acr_token}" \
+    SYFT_REGISTRY_AUTH_USERNAME=00000000-0000-0000-0000-000000000000 \
+    SYFT_REGISTRY_AUTH_PASSWORD="${acr_token}" \
     run_with_timeout "${SETUP_TIMEOUT_AZURE_COMMAND_SECONDS}" \
-      syft scan "registry:${image_ref}" -o "spdx-json=${sbom_file}" \
-    || { rm -f "${sbom_file}"; die "syft failed to generate the SBOM for ${image_ref}."; }
+    syft scan "registry:${image_ref}" -o "spdx-json=${sbom_file}" ||
+    {
+      rm -f "${sbom_file}"
+      die "syft failed to generate the SBOM for ${image_ref}."
+    }
 
   log "Logging in to ${acr_name}.azurecr.io for ORAS..."
   custom_image_oras_login "${acr_name}" "${acr_token}"
@@ -6803,13 +7026,16 @@ custom_image_sbom() {
     cd "$(dirname "${sbom_file}")"
     run_with_timeout "${SETUP_TIMEOUT_AZURE_COMMAND_SECONDS}" \
       oras attach --artifact-type application/spdx+json \
-        "${image_ref}" \
-        "$(basename "${sbom_file}"):application/spdx+json"
-  ) || { rm -f "${sbom_file}"; die "ORAS failed to attach the SBOM referrer to ${image_ref}."; }
+      "${image_ref}" \
+      "$(basename "${sbom_file}"):application/spdx+json"
+  ) || {
+    rm -f "${sbom_file}"
+    die "ORAS failed to attach the SBOM referrer to ${image_ref}."
+  }
   rm -f "${sbom_file}"
 
-  referrer_digest="$(custom_image_sbom_referrer_digest "${image_ref}")" \
-    || die "Could not discover the SBOM referrer for ${image_ref} after attach."
+  referrer_digest="$(custom_image_sbom_referrer_digest "${image_ref}")" ||
+    die "Could not discover the SBOM referrer for ${image_ref} after attach."
   [[ -n "${referrer_digest}" ]] || die "SBOM referrer not visible for ${image_ref} after attach."
   sbom_ref="${acr_name}.azurecr.io/${repo}@${referrer_digest}"
 
@@ -6821,18 +7047,18 @@ custom_image_sbom() {
     log "Resolving signing key id from Key Vault ${akv_name} (cert ${cert_name})..."
     key_id="$(run_with_timeout "${SETUP_TIMEOUT_AZURE_COMMAND_SECONDS}" \
       az keyvault certificate show --vault-name "${akv_name}" --name "${cert_name}" \
-        --query kid -o tsv --only-show-errors)" \
-      || die "Could not read certificate ${cert_name} from Key Vault ${akv_name}. Ensure this principal has Key Vault Certificates Officer + Crypto User."
+      --query kid -o tsv --only-show-errors)" ||
+      die "Could not read certificate ${cert_name} from Key Vault ${akv_name}. Ensure this principal has Key Vault Certificates Officer + Crypto User."
     [[ -n "${key_id}" ]] || die "Empty key id for cert ${cert_name} in ${akv_name}."
     log "Signing SBOM referrer ${sbom_ref} with notation (cose, azure-kv, managedid)..."
     NOTATION_USERNAME=00000000-0000-0000-0000-000000000000 NOTATION_PASSWORD="${acr_token}" \
       run_with_timeout "${SETUP_TIMEOUT_AZURE_COMMAND_SECONDS}" \
       notation sign \
-        --signature-format cose \
-        --id "${key_id}" \
-        --plugin azure-kv \
-        --plugin-config credential_type=managedid \
-        "${sbom_ref}"
+      --signature-format cose \
+      --id "${key_id}" \
+      --plugin azure-kv \
+      --plugin-config credential_type=managedid \
+      "${sbom_ref}"
     sbom_signed=true
   else
     warn "notation azure-kv plugin not available; attaching the SBOM referrer without a signature."
@@ -6858,19 +7084,19 @@ custom_image_sbom_proof() {
 
   require_custom_image_acr_private_dns "${acr_name}"
 
-  digest="$(custom_image_resolve_digest "${acr_name}" "${repo}" "${tag}")" \
-    || die "Could not resolve the digest for ${repo}:${tag} in ${acr_name}."
+  digest="$(custom_image_resolve_digest "${acr_name}" "${repo}" "${tag}")" ||
+    die "Could not resolve the digest for ${repo}:${tag} in ${acr_name}."
   [[ -n "${digest}" ]] || die "Empty digest for ${repo}:${tag} in ${acr_name}."
 
   image_ref="${acr_name}.azurecr.io/${repo}@${digest}"
-  acr_token="$(custom_image_acr_token "${acr_name}" 2>&1)" \
-    || die "Could not get an ACR access token for ${acr_name}. ACR output: ${acr_token}"
+  acr_token="$(custom_image_acr_token "${acr_name}" 2>&1)" ||
+    die "Could not get an ACR access token for ${acr_name}. ACR output: ${acr_token}"
 
   custom_image_oras_login "${acr_name}" "${acr_token}"
 
   log "Discovering SBOM referrer (application/spdx+json) for ${image_ref}..."
-  referrer_digest="$(custom_image_sbom_referrer_digest "${image_ref}")" \
-    || die "Could not query referrers for ${image_ref}."
+  referrer_digest="$(custom_image_sbom_referrer_digest "${image_ref}")" ||
+    die "Could not query referrers for ${image_ref}."
   [[ -n "${referrer_digest}" ]] || die "No application/spdx+json SBOM referrer found for ${image_ref}. Run custom-image sbom first."
 
   sbom_ref="${acr_name}.azurecr.io/${repo}@${referrer_digest}"
@@ -6878,13 +7104,19 @@ custom_image_sbom_proof() {
   pull_dir="$(mktemp -d "${CACHE_DIR}/tmp/custom-image-sbom-pull.XXXXXX")"
   log "Pulling SBOM referrer ${sbom_ref}..."
   run_with_timeout "${SETUP_TIMEOUT_AZURE_COMMAND_SECONDS}" \
-    oras pull "${sbom_ref}" --output "${pull_dir}" \
-    || { rm -rf "${pull_dir}"; die "ORAS failed to pull the SBOM referrer ${sbom_ref}."; }
+    oras pull "${sbom_ref}" --output "${pull_dir}" ||
+    {
+      rm -rf "${pull_dir}"
+      die "ORAS failed to pull the SBOM referrer ${sbom_ref}."
+    }
 
   log "Verifying packaged dependency ${requirement} in the SBOM referrer..."
   ANYSCALE_CUSTOM_IMAGE_REQUIREMENT="${requirement}" \
-    python3 "${ROOT_DIR}/workloads/proofs/custom_image_sbom_proof.py" "${pull_dir}" \
-    || { rm -rf "${pull_dir}"; die "SBOM referrer for ${image_ref} did not contain ${requirement}."; }
+    python3 "${ROOT_DIR}/workloads/proofs/custom_image_sbom_proof.py" "${pull_dir}" ||
+    {
+      rm -rf "${pull_dir}"
+      die "SBOM referrer for ${image_ref} did not contain ${requirement}."
+    }
   rm -rf "${pull_dir}"
 
   printf 'CUSTOM_IMAGE_SBOM_PROOF_OK image_uri=%s digest=%s sbom_referrer=%s requirement=%s\n' \
@@ -6899,7 +7131,7 @@ image_integrity_preflight() {
   local flag_state ext_ver
   flag_state="$(run_with_timeout "${SETUP_TIMEOUT_AZURE_COMMAND_SECONDS}" \
     az feature show --namespace Microsoft.ContainerService --name EnableImageIntegrityPreview \
-      --query properties.state -o tsv --only-show-errors 2>/dev/null || echo Unknown)"
+    --query properties.state -o tsv --only-show-errors 2>/dev/null || echo Unknown)"
   if [[ "${flag_state}" != "Registered" ]]; then
     warn "Subscription feature EnableImageIntegrityPreview is '${flag_state}'."
     warn "Terraform manages this (azapi_resource.image_integrity_feature). If not yet applied, register it with:"
@@ -6938,8 +7170,8 @@ image_integrity_apply_ratify() {
   if [[ -z "${ratify_client_id}" ]]; then
     ratify_client_id="$(run_with_timeout "${SETUP_TIMEOUT_AZURE_COMMAND_SECONDS}" \
       az identity show --resource-group "$(resource_group_name)" \
-        --name "id-ratify-${TF_VAR_project}-${TF_VAR_environment}-${TF_VAR_region_short}" \
-        --query clientId -o tsv --only-show-errors 2>/dev/null || true)"
+      --name "id-ratify-${TF_VAR_project}-${TF_VAR_environment}-${TF_VAR_region_short}" \
+      --query clientId -o tsv --only-show-errors 2>/dev/null || true)"
   fi
   [[ -n "${ratify_client_id}" ]] || die "Could not resolve the Ratify workload identity client id."
   acr_login_server="$(terraform output -raw acr_login_server 2>/dev/null || true)"
@@ -6950,8 +7182,11 @@ image_integrity_apply_ratify() {
   rm -f "${cert_pem}"
   run_with_timeout "${SETUP_TIMEOUT_AZURE_COMMAND_SECONDS}" \
     az keyvault certificate download --vault-name "${akv_name}" --name "${ANYSCALE_SIGNING_CERT_NAME}" \
-      --file "${cert_pem}" --encoding PEM --only-show-errors \
-    || { rm -f "${cert_pem}"; die "Could not download public signing certificate ${ANYSCALE_SIGNING_CERT_NAME} from Key Vault ${akv_name}. Run from the in-VNet jump host or another host that reaches the private Key Vault endpoint."; }
+    --file "${cert_pem}" --encoding PEM --only-show-errors ||
+    {
+      rm -f "${cert_pem}"
+      die "Could not download public signing certificate ${ANYSCALE_SIGNING_CERT_NAME} from Key Vault ${akv_name}. Run from the in-VNet jump host or another host that reaches the private Key Vault endpoint."
+    }
 
   export ANYSCALE_AKV_URI="${akv_uri}"
   export ANYSCALE_RATIFY_CLIENT_ID="${ratify_client_id}"
@@ -6964,8 +7199,8 @@ image_integrity_apply_ratify() {
   log "Waiting for the Ratify pod (gatekeeper-system) deployed by the Image Integrity policy..."
   run_with_timeout "${SETUP_TIMEOUT_K8S_ROLLOUT_SECONDS:-600}" \
     kubectl wait pod --namespace gatekeeper-system --selector app=ratify \
-      --for=condition=Ready --timeout=300s \
-    || die "Ratify pod not Ready. If Image Integrity was just enabled, the Azure Policy remediation may still be deploying it; re-run after it settles."
+    --for=condition=Ready --timeout=300s ||
+    die "Ratify pod not Ready. If Image Integrity was just enabled, the Azure Policy remediation may still be deploying it; re-run after it settles."
 
   # Earlier versions of this sample used a KeyManagementProvider. The managed
   # AKS Ratify verifier expects a CertificateStore for inline public certs.
@@ -6976,7 +7211,7 @@ image_integrity_apply_ratify() {
     log "Applying Ratify CRD ${manifest}..."
     rendered_manifest="$(mktemp "${CACHE_DIR}/tmp/ratify-${manifest}.XXXXXX")"
     envsubst '$ANYSCALE_AKV_URI $AZURE_TENANT_ID $ANYSCALE_RATIFY_CLIENT_ID $ANYSCALE_SIGNING_CERT_NAME $ANYSCALE_SIGNING_CERT_PEM $ANYSCALE_ACR_LOGIN_SERVER $ANYSCALE_CUSTOM_IMAGE_REPOSITORY $ANYSCALE_SIGNING_CERT_SUBJECT' \
-      < "${crd_dir}/${manifest}" > "${rendered_manifest}"
+      <"${crd_dir}/${manifest}" >"${rendered_manifest}"
     [[ -s "${rendered_manifest}" ]] || die "Rendered Ratify manifest ${manifest} was empty."
     run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_WORKSPACE_COMMAND_SECONDS:-180}" kubectl apply -f "${rendered_manifest}"
     rm -f "${rendered_manifest}"
@@ -7058,12 +7293,12 @@ copy_workload_proofs_to_pod() {
 
   run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_WORKSPACE_COMMAND_SECONDS}" \
     kubectl exec -n "${namespace}" -c ray "${pod}" -- \
-      bash -lc "mkdir -p '${remote_dir}'"
+    bash -lc "mkdir -p '${remote_dir}'"
 
   marker_present=false
   if run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_WORKSPACE_COMMAND_SECONDS}" \
     kubectl exec -n "${namespace}" -c ray "${pod}" -- \
-      bash -lc "test -f '${marker_path}'" >/dev/null 2>&1; then
+    bash -lc "test -f '${marker_path}'" >/dev/null 2>&1; then
     marker_present=true
   fi
 
@@ -7075,11 +7310,11 @@ copy_workload_proofs_to_pod() {
   log "Copying workload proof scripts to pod ${pod}:${remote_dir}"
   run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_WORKSPACE_COMMAND_SECONDS}" \
     kubectl cp -n "${namespace}" -c ray \
-      "${proof_dir}/." \
-      "${pod}:${remote_dir}/"
+    "${proof_dir}/." \
+    "${pod}:${remote_dir}/"
   run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_WORKSPACE_COMMAND_SECONDS}" \
     kubectl exec -n "${namespace}" -c ray "${pod}" -- \
-      bash -lc "touch '${marker_path}'"
+    bash -lc "touch '${marker_path}'"
 }
 
 prepare_workload_submission_dir() {
@@ -7110,10 +7345,10 @@ workload_workspace_id() {
 
   run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS}" \
     "${cli_bin}" workspace_v2 get \
-      --name "${workspace_name}" \
-      --cloud "${ANYSCALE_CLOUD_NAME}" \
-      --json \
-    | jq -r '.id // empty'
+    --name "${workspace_name}" \
+    --cloud "${ANYSCALE_CLOUD_NAME}" \
+    --json |
+    jq -r '.id // empty'
 }
 
 ensure_workload_workspace_running() {
@@ -7124,11 +7359,11 @@ ensure_workload_workspace_running() {
 
   if status_output="$(run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS}" \
     "${cli_bin}" workspace_v2 status \
-      --name "${workspace_name}" \
-      --cloud "${ANYSCALE_CLOUD_NAME}" 2>&1)"; then
+    --name "${workspace_name}" \
+    --cloud "${ANYSCALE_CLOUD_NAME}" 2>&1)"; then
     workspace_status="$(normalize_anyscale_workspace_status "${status_output}")"
     [[ -n "${workspace_status}" ]] || workspace_status="UNKNOWN"
-    printf '%s\n' "${status_output}" > "${wait_log}.status"
+    printf '%s\n' "${status_output}" >"${wait_log}.status"
 
     case "${workspace_status}" in
       RUNNING)
@@ -7141,21 +7376,21 @@ ensure_workload_workspace_running() {
         log "Workspace ${workspace_name} is already STARTING; waiting for it to become RUNNING."
         printf '%s\n' "${workspace_status}" | tee "${wait_log}.start"
         ;;
-      CREATE_FAILED|FAILED|ERROR)
+      CREATE_FAILED | FAILED | ERROR)
         die "Workspace ${workspace_name} is unhealthy with API status ${workspace_status}."
         ;;
-      TERMINATED|TERMINATING|UNKNOWN)
+      TERMINATED | TERMINATING | UNKNOWN)
         ;;
     esac
   else
-    printf '%s\n' "${status_output}" > "${wait_log}.status"
+    printf '%s\n' "${status_output}" >"${wait_log}.status"
   fi
 
   log "Starting or reusing workspace ${workspace_name}"
   if ! start_output="$(run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS}" \
     "${cli_bin}" workspace_v2 start \
-      --name "${workspace_name}" \
-      --cloud "${ANYSCALE_CLOUD_NAME}" 2>&1)"; then
+    --name "${workspace_name}" \
+    --cloud "${ANYSCALE_CLOUD_NAME}" 2>&1)"; then
     printf '%s\n' "${start_output}" | tee "${wait_log}.start"
     if ! grep -Eiq 'already.*running|currently in state: STARTING|currently in state: RUNNING' <<<"${start_output}"; then
       die "Workspace ${workspace_name} could not be started. See ${wait_log}.start."
@@ -7179,8 +7414,8 @@ release_workload_workspace_if_running() {
 
   if ! status_output="$(run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS}" \
     "${cli_bin}" workspace_v2 status \
-      --name "${workspace_name}" \
-      --cloud "${ANYSCALE_CLOUD_NAME}" 2>&1)"; then
+    --name "${workspace_name}" \
+    --cloud "${ANYSCALE_CLOUD_NAME}" 2>&1)"; then
     if grep -Eiq 'not found|does not exist' <<<"${status_output}"; then
       log "Workspace ${workspace_name} does not exist; nothing to release."
       return 0
@@ -7191,7 +7426,7 @@ release_workload_workspace_if_running() {
 
   workspace_status="$(normalize_anyscale_workspace_status "${status_output}")"
   [[ -n "${workspace_status}" ]] || workspace_status="UNKNOWN"
-  printf '%s\n' "${status_output}" > "${wait_log}.release-status"
+  printf '%s\n' "${status_output}" >"${wait_log}.release-status"
 
   case "${workspace_status}" in
     TERMINATED)
@@ -7201,12 +7436,12 @@ release_workload_workspace_if_running() {
     TERMINATING)
       log "Workspace ${workspace_name} is already TERMINATING; waiting for it to finish releasing GPU capacity."
       ;;
-    RUNNING|STARTING|PENDING|UPDATING|RESTARTING|RESUMING|STOPPING|UNKNOWN)
+    RUNNING | STARTING | PENDING | UPDATING | RESTARTING | RESUMING | STOPPING | UNKNOWN)
       log "Terminating workspace ${workspace_name} to release compute for GPU proof jobs and services."
       if ! terminate_output="$(run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS}" \
         "${cli_bin}" workspace_v2 terminate \
-          --name "${workspace_name}" \
-          --cloud "${ANYSCALE_CLOUD_NAME}" 2>&1)"; then
+        --name "${workspace_name}" \
+        --cloud "${ANYSCALE_CLOUD_NAME}" 2>&1)"; then
         printf '%s\n' "${terminate_output}" | tee "${wait_log}.release-terminate"
         if ! grep -Eiq 'already.*terminated|currently in state: TERMINATED|currently in state: TERMINATING' <<<"${terminate_output}"; then
           die "Workspace ${workspace_name} could not be terminated to release GPU capacity. See ${wait_log}.release-terminate."
@@ -7234,27 +7469,27 @@ wait_for_workload_workspace_command_ready() {
   local wait_log="$3"
   local deadline current_epoch probe_output previous_message=""
 
-  deadline=$(( $(date +%s) + SETUP_TIMEOUT_ANYSCALE_WORKSPACE_WAIT_SECONDS ))
+  deadline=$(($(date +%s) + SETUP_TIMEOUT_ANYSCALE_WORKSPACE_WAIT_SECONDS))
 
   while true; do
     if probe_output="$(run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS}" \
       "${cli_bin}" workspace_v2 run_command \
-        --name "${workspace_name}" \
-        --cloud "${ANYSCALE_CLOUD_NAME}" \
-        "true" 2>&1)"; then
-      printf '%s\n' "${probe_output}" >> "${wait_log}.command-ready"
+      --name "${workspace_name}" \
+      --cloud "${ANYSCALE_CLOUD_NAME}" \
+      "true" 2>&1)"; then
+      printf '%s\n' "${probe_output}" >>"${wait_log}.command-ready"
       log "Workspace ${workspace_name} command channel is ready."
       return 0
     fi
 
-    printf '%s\n' "${probe_output}" >> "${wait_log}.command-ready"
+    printf '%s\n' "${probe_output}" >>"${wait_log}.command-ready"
     if [[ "${probe_output}" != "${previous_message}" ]]; then
       warn "Workspace ${workspace_name} command channel is not ready yet; waiting before push/run_command."
       previous_message="${probe_output}"
     fi
 
     current_epoch=$(date +%s)
-    if (( current_epoch >= deadline )); then
+    if ((current_epoch >= deadline)); then
       die "Workspace ${workspace_name} command channel did not become ready. See ${wait_log}.command-ready."
     fi
 
@@ -7290,33 +7525,33 @@ collect_workload_diagnostics() {
   if [[ -n "${workspace_id}" ]]; then
     run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS}" \
       "${cli_bin}" logs workspace \
-        --id "${workspace_id}" \
-        --tail 200 \
-      > "${diagnostics_dir}/anyscale-workspace.tail.log" 2>&1 || true
+      --id "${workspace_id}" \
+      --tail 200 \
+      >"${diagnostics_dir}/anyscale-workspace.tail.log" 2>&1 || true
 
     run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS}" \
       "${cli_bin}" logs workspace \
-        --id "${workspace_id}" \
-        --download \
-        --download-dir "${diagnostics_dir}/anyscale-workspace-logs" \
-      > "${diagnostics_dir}/anyscale-workspace-download.log" 2>&1 || true
+      --id "${workspace_id}" \
+      --download \
+      --download-dir "${diagnostics_dir}/anyscale-workspace-logs" \
+      >"${diagnostics_dir}/anyscale-workspace-download.log" 2>&1 || true
   fi
 
   kubectl get pods -n "${namespace}" \
     -l "app.kubernetes.io/name=${workspace_name}" \
-    -o wide > "${diagnostics_dir}/pods.txt" 2>&1 || true
+    -o wide >"${diagnostics_dir}/pods.txt" 2>&1 || true
   kubectl describe pods -n "${namespace}" \
     -l "app.kubernetes.io/name=${workspace_name}" \
-    > "${diagnostics_dir}/pods.describe.txt" 2>&1 || true
+    >"${diagnostics_dir}/pods.describe.txt" 2>&1 || true
   kubectl logs -n "${namespace}" \
     -l "app.kubernetes.io/name=anyscale-operator" \
-    --tail=200 > "${diagnostics_dir}/anyscale-operator.log" 2>&1 || true
+    --tail=200 >"${diagnostics_dir}/anyscale-operator.log" 2>&1 || true
   kubectl logs -n "${namespace}" \
     -l "app.kubernetes.io/name=${workspace_name}" \
     --all-containers=true \
-    --tail=200 > "${diagnostics_dir}/workspace-containers.log" 2>&1 || true
+    --tail=200 >"${diagnostics_dir}/workspace-containers.log" 2>&1 || true
   kubectl get events -n "${namespace}" \
-    --sort-by=.lastTimestamp > "${diagnostics_dir}/events.txt" 2>&1 || true
+    --sort-by=.lastTimestamp >"${diagnostics_dir}/events.txt" 2>&1 || true
 }
 
 run_workspace_proof() {
@@ -7348,7 +7583,7 @@ run_workspace_proof() {
   set +e
   run_with_timeout "${WORKLOAD_COMMAND_TIMEOUT_SECONDS}" \
     kubectl exec -n "${namespace}" -c ray "${head_pod}" -- \
-      bash -lc "cd '${remote_dir}' && python '${script_name}'" 2>&1 | tee "${output_log}"
+    bash -lc "cd '${remote_dir}' && python '${script_name}'" 2>&1 | tee "${output_log}"
   proof_exit=${PIPESTATUS[0]}
   set -e
 
@@ -7382,8 +7617,8 @@ anyscale_job_runtime_head_pod() {
   local job_name="$1"
   local namespace="$2"
 
-  kubectl get pods -n "${namespace}" -l "app.kubernetes.io/name=${job_name},ray-node-type=head" -o json 2>/dev/null \
-    | jq -r '[.items[]? | select((.metadata.deletionTimestamp // "") == "" and .status.phase == "Running" and ((.status.containerStatuses // []) | length > 0 and all(.ready == true)))] | sort_by(.metadata.creationTimestamp) | (.[-1].metadata.name // empty)'
+  kubectl get pods -n "${namespace}" -l "app.kubernetes.io/name=${job_name},ray-node-type=head" -o json 2>/dev/null |
+    jq -r '[.items[]? | select((.metadata.deletionTimestamp // "") == "" and .status.phase == "Running" and ((.status.containerStatuses // []) | length > 0 and all(.ready == true)))] | sort_by(.metadata.creationTimestamp) | (.[-1].metadata.name // empty)'
 }
 
 wait_for_anyscale_job_runtime_head_pod() {
@@ -7402,7 +7637,7 @@ wait_for_anyscale_job_runtime_head_pod() {
     fi
 
     current_epoch="$(date +%s)"
-    if (( current_epoch - start_epoch >= timeout_seconds )); then
+    if ((current_epoch - start_epoch >= timeout_seconds)); then
       return 1
     fi
 
@@ -7424,7 +7659,7 @@ terminate_anyscale_job_from_status() {
   [[ -n "${job_id}" ]] || return 0
 
   case "${job_state}" in
-    SUCCEEDED|FAILED|TERMINATED|ERRORED|BROKEN|OUT_OF_RETRIES|CANCELLED|CANCELED)
+    SUCCEEDED | FAILED | TERMINATED | ERRORED | BROKEN | OUT_OF_RETRIES | CANCELLED | CANCELED)
       return 0
       ;;
   esac
@@ -7432,12 +7667,12 @@ terminate_anyscale_job_from_status() {
   terminate_log="${jobs_dir}/${job_name}.terminate.log"
   if output="$(run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS}" \
     "${cli_bin}" job terminate --id "${job_id}" 2>&1)"; then
-    printf '%s\n' "${output}" >> "${terminate_log}"
+    printf '%s\n' "${output}" >>"${terminate_log}"
     log "Terminate requested for fallback job ${job_name} (${job_id})"
     return 0
   fi
 
-  printf '%s\n' "${output}" >> "${terminate_log}"
+  printf '%s\n' "${output}" >>"${terminate_log}"
   if grep -Eiq 'already.*(terminated|failed|succeeded)|currently in state: (FAILED|SUCCEEDED|TERMINATED)' <<<"${output}"; then
     warn "Fallback job ${job_name} (${job_id}) was already in a terminal state."
     return 0
@@ -7495,27 +7730,27 @@ run_anyscale_job_proof() {
       "ANYSCALE_CLI_TOKEN=${ANYSCALE_CLI_TOKEN}"
       "ANYSCALE_CLOUD_NAME=${ANYSCALE_CLOUD_NAME}"
     )
-    if (( proof_env_spec_count > 0 )); then
+    if ((proof_env_spec_count > 0)); then
       write_export_env_script "${env_file}" "${auth_env_specs[@]}" "${proof_env_specs[@]}"
     else
       write_export_env_script "${env_file}" "${auth_env_specs[@]}"
     fi
     run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_WORKSPACE_COMMAND_SECONDS}" \
       kubectl cp -n "${namespace}" -c ray \
-        "${env_file}" \
-        "${head_pod}:${remote_env_path}"
+      "${env_file}" \
+      "${head_pod}:${remote_env_path}"
     run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_WORKSPACE_COMMAND_SECONDS}" \
       kubectl exec -n "${namespace}" -c ray "${head_pod}" -- \
-        bash -lc "source $(shell_join "${remote_env_path}") && cd $(shell_join "${remote_dir}") && $(workspace_anyscale_cli_upgrade_script)" 2>&1 | tee "${jobs_dir}/${job_name}.cli-upgrade.log"
+      bash -lc "source $(shell_join "${remote_env_path}") && cd $(shell_join "${remote_dir}") && $(workspace_anyscale_cli_upgrade_script)" 2>&1 | tee "${jobs_dir}/${job_name}.cli-upgrade.log"
   fi
 
   job_cmd=(
     job submit
-      --name "${job_name}"
-      --wait
-      --compute-config "${compute_config_name}"
-      --working-dir "${submit_working_dir}"
-      --cloud "${ANYSCALE_CLOUD_NAME}"
+    --name "${job_name}"
+    --wait
+    --compute-config "${compute_config_name}"
+    --working-dir "${submit_working_dir}"
+    --cloud "${ANYSCALE_CLOUD_NAME}"
   )
   if [[ "${submit_from_workspace}" != true ]]; then
     job_cmd=("${cli_bin}" "${job_cmd[@]}")
@@ -7529,7 +7764,7 @@ run_anyscale_job_proof() {
     job_cmd+=("${image_runtime_flags[@]}")
   fi
 
-  if (( proof_env_spec_count > 0 )); then
+  if ((proof_env_spec_count > 0)); then
     for env_spec in "${proof_env_specs[@]}"; do
       job_cmd+=(--env "${env_spec}")
     done
@@ -7548,7 +7783,7 @@ run_anyscale_job_proof() {
   require_positive_integer_arg "ANYSCALE_JOB_PROOF_SUBMIT_ATTEMPTS" "${job_submit_attempts}"
   require_positive_integer_arg "ANYSCALE_JOB_PROOF_SUBMIT_RETRY_SECONDS" "${job_submit_retry_delay}"
   job_exit=0
-  for ((job_submit_attempt=1; job_submit_attempt<=job_submit_attempts; job_submit_attempt++)); do
+  for ((job_submit_attempt = 1; job_submit_attempt <= job_submit_attempts; job_submit_attempt++)); do
     if [[ "${job_submit_attempt}" -gt 1 ]]; then
       log "Retrying Anyscale job proof ${job_name} submission after transient backend error (attempt ${job_submit_attempt}/${job_submit_attempts})"
       sleep "${job_submit_retry_delay}"
@@ -7556,16 +7791,17 @@ run_anyscale_job_proof() {
     set +e
     if [[ "${submit_from_workspace}" == true ]]; then
       job_command="$(shell_join "${job_cmd[@]}")"
-      remote_command="$(cat <<EOF
+      remote_command="$(
+        cat <<EOF
 set -euo pipefail
 source $(shell_join "${remote_env_path}")
 cd $(shell_join "${remote_dir}")
 ${job_command}
 EOF
-)"
+      )"
       run_with_timeout "${job_wait_timeout_seconds}" \
         kubectl exec -n "${namespace}" -c ray "${head_pod}" -- \
-          bash -lc "${remote_command}" 2>&1 | tee "${output_log}"
+        bash -lc "${remote_command}" 2>&1 | tee "${output_log}"
     else
       ANYSCALE_HOST="${ANYSCALE_HOST}" run_with_timeout "${job_wait_timeout_seconds}" \
         "${job_cmd[@]}" 2>&1 | tee "${output_log}"
@@ -7577,21 +7813,20 @@ EOF
       break
     fi
     if [[ "${job_submit_attempt}" -lt "${job_submit_attempts}" ]]; then
-      : > "${output_log}"
+      : >"${output_log}"
     fi
   done
 
   run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS}" \
     "${cli_bin}" job status \
-      --name "${job_name}" \
-      --cloud "${ANYSCALE_CLOUD_NAME}" \
-      --json \
-      --verbose \
-      --include-archived \
-    > "${status_log}" 2>&1 || true
+    --name "${job_name}" \
+    --cloud "${ANYSCALE_CLOUD_NAME}" \
+    --json \
+    --verbose \
+    --include-archived \
+    >"${status_log}" 2>&1 || true
 
   WORKLOAD_LAST_JOB_OUTPUT_LOG="${output_log}"
-  WORKLOAD_LAST_JOB_STATUS_LOG="${status_log}"
 
   status_state=""
   status_run_count=""
@@ -7602,9 +7837,9 @@ EOF
     job_id="$(jq -r '.id // empty' "${status_log}" 2>/dev/null || true)"
   fi
 
-  if ! grep -q "${success_marker}" "${output_log}" \
-    && [[ "${status_state}" == "SUCCEEDED" ]] \
-    && [[ -n "${job_id}" ]]; then
+  if ! grep -q "${success_marker}" "${output_log}" &&
+    [[ "${status_state}" == "SUCCEEDED" ]] &&
+    [[ -n "${job_id}" ]]; then
     job_log_max_lines="${ANYSCALE_JOB_PROOF_LOG_MAX_LINES:-1000}"
     log "Anyscale job ${job_name} succeeded, but the submit stream did not include ${success_marker}; fetching job logs from ${workspace_name} head pod."
     printf '\n[setup] Anyscale job logs for %s (%s)\n' "${job_name}" "${job_id}" | tee -a "${output_log}"
@@ -7618,7 +7853,7 @@ EOF
       if [[ "${submit_from_workspace}" == true ]]; then
         run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS}" \
           kubectl exec -n "${namespace}" -c ray "${head_pod}" -- \
-            bash -lc "source $(shell_join "${remote_env_path}") && anyscale job logs --id $(shell_join "${job_id}") --tail --max-lines $(shell_join "${job_log_max_lines}")" 2>&1 | tee -a "${output_log}"
+          bash -lc "source $(shell_join "${remote_env_path}") && anyscale job logs --id $(shell_join "${job_id}") --tail --max-lines $(shell_join "${job_log_max_lines}")" 2>&1 | tee -a "${output_log}"
       else
         ANYSCALE_HOST="${ANYSCALE_HOST}" run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS}" \
           "${cli_bin}" job logs --id "${job_id}" --tail --max-lines "${job_log_max_lines}" 2>&1 | tee -a "${output_log}"
@@ -7639,17 +7874,17 @@ EOF
     fi
   fi
 
-  if { [[ "${job_exit}" -ne 0 ]] || ! grep -q "${success_marker}" "${output_log}"; } \
-    && [[ "${ANYSCALE_JOB_PROOF_K8S_FALLBACK:-1}" == "1" ]] \
-    && [[ "${status_state}" == "STARTING" ]] \
-    && [[ "${status_run_count}" == "0" ]]; then
+  if { [[ "${job_exit}" -ne 0 ]] || ! grep -q "${success_marker}" "${output_log}"; } &&
+    [[ "${ANYSCALE_JOB_PROOF_K8S_FALLBACK:-1}" == "1" ]] &&
+    [[ "${status_state}" == "STARTING" ]] &&
+    [[ "${status_run_count}" == "0" ]]; then
     fallback_wait_seconds="${ANYSCALE_JOB_PROOF_FALLBACK_WAIT_SECONDS:-300}"
     if fallback_head_pod="$(wait_for_anyscale_job_runtime_head_pod "${job_name}" "${namespace}" "${fallback_wait_seconds}")"; then
       log "Anyscale job ${job_name} is STARTING with no runs, but runtime head pod ${fallback_head_pod} is ready; using Kubernetes-backed proof fallback."
       printf '\n[setup] Kubernetes-backed fallback for Anyscale job %s on pod %s\n' "${job_name}" "${fallback_head_pod}" | tee -a "${output_log}"
       copy_workload_proofs_to_pod "${namespace}" "${fallback_head_pod}" "${remote_dir}"
       if [[ "${submit_from_workspace}" != true ]]; then
-        if (( proof_env_spec_count > 0 )); then
+        if ((proof_env_spec_count > 0)); then
           write_export_env_script "${env_file}" "${proof_env_specs[@]}"
         else
           write_export_env_script "${env_file}"
@@ -7657,8 +7892,8 @@ EOF
       fi
       run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_WORKSPACE_COMMAND_SECONDS}" \
         kubectl cp -n "${namespace}" -c ray \
-          "${env_file}" \
-          "${fallback_head_pod}:${remote_env_path}"
+        "${env_file}" \
+        "${fallback_head_pod}:${remote_env_path}"
 
       # For GPU jobs the job-cluster head pod starts on a CPU node; the GPU
       # worker pod autoscales separately (AKS Standard_NC16as_T4_v3 nodes
@@ -7667,21 +7902,21 @@ EOF
       # least one GPU worker pod to become Ready before executing the proof.
       if [[ "${compute_config_name}" == "${WORKLOAD_GPU_COMPUTE_CONFIG_NAME:-}" ]]; then
         fb_gpu_wait_seconds="${ANYSCALE_JOB_PROOF_FALLBACK_GPU_WORKER_WAIT_SECONDS:-600}"
-        fb_gpu_deadline=$(( $(date +%s) + fb_gpu_wait_seconds ))
+        fb_gpu_deadline=$(($(date +%s) + fb_gpu_wait_seconds))
         log "GPU job fallback: waiting up to ${fb_gpu_wait_seconds}s for a GPU worker pod to join job cluster ${job_name} before running proof..."
         printf '\n[setup] GPU fallback worker wait: job=%s timeout=%ss\n' "${job_name}" "${fb_gpu_wait_seconds}" | tee -a "${output_log}"
         while true; do
           fb_gpu_worker_pod="$(kubectl get pods -n "${namespace}" \
             -l "app.kubernetes.io/name=${job_name},ray-node-type=worker" \
             --request-timeout=15s \
-            -o json 2>/dev/null \
-            | jq -r '[.items[]? | select(.metadata.deletionTimestamp == null) | select(.status.phase == "Running") | select(any(.status.conditions[]?; .type == "Ready" and .status == "True"))] | sort_by(.metadata.creationTimestamp) | last | .metadata.name // empty')"
+            -o json 2>/dev/null |
+            jq -r '[.items[]? | select(.metadata.deletionTimestamp == null) | select(.status.phase == "Running") | select(any(.status.conditions[]?; .type == "Ready" and .status == "True"))] | sort_by(.metadata.creationTimestamp) | last | .metadata.name // empty')"
           if [[ -n "${fb_gpu_worker_pod}" ]]; then
             log "GPU worker pod ${fb_gpu_worker_pod} is Ready in job cluster ${job_name}; proceeding with fallback proof."
             printf '[setup] GPU fallback worker ready: pod=%s\n' "${fb_gpu_worker_pod}" | tee -a "${output_log}"
             break
           fi
-          if (( $(date +%s) >= fb_gpu_deadline )); then
+          if (($(date +%s) >= fb_gpu_deadline)); then
             warn "No GPU worker pod became Ready in job cluster ${job_name} within ${fb_gpu_wait_seconds}s. This typically indicates GPU node pool autoscaling lag or capacity contention (the aks-gpu-workspace may hold the only provisioned GPU node). The fallback proof will run but will likely report 0 GPU resources. Check: kubectl get pods -n ${namespace} -l app.kubernetes.io/name=${job_name} -o wide"
             printf '[setup] GPU fallback worker timeout after %ss; proceeding without confirmed worker\n' "${fb_gpu_wait_seconds}" | tee -a "${output_log}"
             break
@@ -7694,7 +7929,7 @@ EOF
       set +e
       run_with_timeout "${WORKLOAD_COMMAND_TIMEOUT_SECONDS}" \
         kubectl exec -n "${namespace}" -c ray "${fallback_head_pod}" -- \
-          bash -lc "source '${remote_env_path}' && cd '${remote_dir}' && python '${script_name}'" 2>&1 | tee -a "${output_log}"
+        bash -lc "source '${remote_env_path}' && cd '${remote_dir}' && python '${script_name}'" 2>&1 | tee -a "${output_log}"
       fallback_exit=${PIPESTATUS[0]}
       set -e
       if [[ "${fallback_exit}" -eq 0 ]]; then
@@ -7731,7 +7966,7 @@ redact_anyscale_service_status_file() {
 
   [[ -s "${status_file}" ]] || return 0
   redacted_file="${status_file}.redacted"
-  if jq 'walk(if type == "object" and has("query_auth_token") then .query_auth_token = "<redacted>" else . end)' "${status_file}" > "${redacted_file}"; then
+  if jq 'walk(if type == "object" and has("query_auth_token") then .query_auth_token = "<redacted>" else . end)' "${status_file}" >"${redacted_file}"; then
     mv "${redacted_file}" "${status_file}"
   else
     rm -f "${redacted_file}"
@@ -7751,17 +7986,17 @@ wait_for_anyscale_service_ready() {
   namespace="${TF_VAR_anyscale_operator_namespace:-anyscale-operator}"
   api_lag_grace_seconds="${ANYSCALE_SERVICE_PROOF_API_LAG_GRACE_SECONDS:-120}"
   ANYSCALE_SERVICE_WAIT_RESULT=""
-  : > "${wait_log}"
+  : >"${wait_log}"
 
   while true; do
     tmp_status_log="${status_log}.tmp"
     if run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS}" \
       "${cli_bin}" service status \
-        --name "${service_name}" \
-        --cloud "${cloud_name}" \
-        --json \
-        --verbose \
-      > "${tmp_status_log}" 2>&1; then
+      --name "${service_name}" \
+      --cloud "${cloud_name}" \
+      --json \
+      --verbose \
+      >"${tmp_status_log}" 2>&1; then
       mv "${tmp_status_log}" "${status_log}"
       service_state="$(jq -r '.state // ""' "${status_log}")"
       primary_version_state="$(jq -r '.primary_version.state // ""' "${status_log}")"
@@ -7771,19 +8006,19 @@ wait_for_anyscale_service_ready() {
       fi
     else
       if [[ -f "${tmp_status_log}" ]]; then
-        cat "${tmp_status_log}" >> "${wait_log}"
+        cat "${tmp_status_log}" >>"${wait_log}"
         mv "${tmp_status_log}" "${status_log}"
       fi
     fi
 
     current_epoch="$(date +%s)"
-    if (( current_epoch - start_epoch >= timeout_seconds )); then
+    if ((current_epoch - start_epoch >= timeout_seconds)); then
       ANYSCALE_SERVICE_WAIT_RESULT="TIMEOUT"
       return 1
     fi
 
-    if [[ "${ANYSCALE_SERVICE_PROOF_K8S_FALLBACK:-1}" == "1" ]] \
-      && (( current_epoch - start_epoch >= api_lag_grace_seconds )); then
+    if [[ "${ANYSCALE_SERVICE_PROOF_K8S_FALLBACK:-1}" == "1" ]] &&
+      ((current_epoch - start_epoch >= api_lag_grace_seconds)); then
       runtime_head_pod="$(anyscale_service_runtime_head_pod_name "${service_name}" "${namespace}" "${wait_log}" || true)"
       if [[ -n "${runtime_head_pod}" ]]; then
         ANYSCALE_SERVICE_WAIT_RESULT="RUNTIME_HEAD_READY_API_LAG"
@@ -7806,7 +8041,7 @@ anyscale_service_runtime_head_pod_name() {
     -l "app.kubernetes.io/name=${service_name},ray-node-type=head" \
     --field-selector=status.phase=Running \
     --sort-by=.metadata.creationTimestamp \
-    -o name 2>> "${wait_log}" | sed 's#pod/##' | tail -n1
+    -o name 2>>"${wait_log}" | sed 's#pod/##' | tail -n1
 }
 
 wait_for_anyscale_service_terminated() {
@@ -7819,28 +8054,28 @@ wait_for_anyscale_service_terminated() {
   local start_epoch current_epoch service_state tmp_status_log
 
   start_epoch="$(date +%s)"
-  : > "${wait_log}"
+  : >"${wait_log}"
 
   while true; do
     tmp_status_log="${status_log}.tmp"
     if run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS}" \
       "${cli_bin}" service status \
-        --name "${service_name}" \
-        --cloud "${cloud_name}" \
-        --json \
-        --verbose \
-      > "${tmp_status_log}" 2>&1; then
+      --name "${service_name}" \
+      --cloud "${cloud_name}" \
+      --json \
+      --verbose \
+      >"${tmp_status_log}" 2>&1; then
       mv "${tmp_status_log}" "${status_log}"
       service_state="$(jq -r '.state // ""' "${status_log}")"
       printf 'service_state=%s\n' "${service_state}" | tee -a "${wait_log}"
       case "${service_state}" in
-        TERMINATED|SYSTEM_FAILURE)
+        TERMINATED | SYSTEM_FAILURE)
           return 0
           ;;
       esac
     else
       if [[ -f "${tmp_status_log}" ]]; then
-        cat "${tmp_status_log}" >> "${wait_log}"
+        cat "${tmp_status_log}" >>"${wait_log}"
         mv "${tmp_status_log}" "${status_log}"
       fi
       if grep -Eiq 'not found|does not exist|404' "${status_log}" 2>/dev/null; then
@@ -7849,7 +8084,7 @@ wait_for_anyscale_service_terminated() {
     fi
 
     current_epoch="$(date +%s)"
-    if (( current_epoch - start_epoch >= timeout_seconds )); then
+    if ((current_epoch - start_epoch >= timeout_seconds)); then
       die "Service ${service_name} did not terminate within ${timeout_seconds}s. See ${wait_log} and ${status_log}."
     fi
 
@@ -7865,15 +8100,15 @@ terminate_anyscale_service_if_present() {
   local terminate_log="$5"
   local service_id service_state output
 
-  : > "${terminate_log}"
+  : >"${terminate_log}"
 
   if ! run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS}" \
     "${cli_bin}" service status \
-      --name "${service_name}" \
-      --cloud "${cloud_name}" \
-      --json \
-      --verbose \
-    > "${status_log}" 2>&1; then
+    --name "${service_name}" \
+    --cloud "${cloud_name}" \
+    --json \
+    --verbose \
+    >"${status_log}" 2>&1; then
     return 0
   fi
 
@@ -7882,7 +8117,7 @@ terminate_anyscale_service_if_present() {
   [[ -n "${service_id}" ]] || return 0
 
   case "${service_state}" in
-    TERMINATED|SYSTEM_FAILURE)
+    TERMINATED | SYSTEM_FAILURE)
       log "Found existing service ${service_name} in state ${service_state}; reusing the name for a fresh proof deploy."
       return 0
       ;;
@@ -7891,9 +8126,9 @@ terminate_anyscale_service_if_present() {
   log "Terminating existing service ${service_name} (${service_id}) in state ${service_state} before proof deploy"
   if output="$(run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS}" \
     "${cli_bin}" service terminate --service-id "${service_id}" 2>&1)"; then
-    printf '%s\n' "${output}" >> "${terminate_log}"
+    printf '%s\n' "${output}" >>"${terminate_log}"
   else
-    printf '%s\n' "${output}" >> "${terminate_log}"
+    printf '%s\n' "${output}" >>"${terminate_log}"
     if ! grep -Eiq 'already.*terminated|currently in state: TERMINATED|currently in state: TERMINATING' <<<"${output}"; then
       die "Failed to terminate existing service ${service_name}. See ${terminate_log}."
     fi
@@ -7944,43 +8179,43 @@ curl_anyscale_service_via_head_pod() {
   service_path="$(service_url_path "${service_url}")"
   [[ -n "${service_path}" ]] || service_path='/'
 
-  : > "${tunnel_log}"
+  : >"${tunnel_log}"
   pod_list="$(kubectl get pods \
     -n "${namespace}" \
     -l "app.kubernetes.io/name=${service_name},ray-node-type=head" \
     --field-selector=status.phase=Running \
     --sort-by=.metadata.creationTimestamp \
-    -o name 2>> "${tunnel_log}" | sed 's#pod/##')"
+    -o name 2>>"${tunnel_log}" | sed 's#pod/##')"
   [[ -n "${pod_list}" ]] || return 1
 
   request_body_b64="$(printf '%s' "${request_body}" | base64 | tr -d '\n')"
 
   while IFS= read -r pod; do
     [[ -n "${pod}" ]] || continue
-    printf 'Trying service head pod %s\n' "${pod}" >> "${tunnel_log}"
+    printf 'Trying service head pod %s\n' "${pod}" >>"${tunnel_log}"
 
     curl_exit=0
     set +e
     if [[ "${method}" == "GET" ]]; then
       kubectl exec -n "${namespace}" -c ray "${pod}" -- \
         curl -sfS "http://127.0.0.1:8000${service_path}" \
-        > "${response_file}" 2>> "${stderr_file}"
+        >"${response_file}" 2>>"${stderr_file}"
       curl_exit=$?
     else
       kubectl exec -n "${namespace}" -c ray "${pod}" -- sh -lc \
         "printf %s \"${request_body_b64}\" | base64 -d >/tmp/anyscale-service-proof-request.json && curl -sfS -H \"Content-Type: application/json\" --data-binary @/tmp/anyscale-service-proof-request.json \"http://127.0.0.1:8000${service_path}\"" \
-        > "${response_file}" 2>> "${stderr_file}"
+        >"${response_file}" 2>>"${stderr_file}"
       curl_exit=$?
     fi
     set -e
 
     if [[ "${curl_exit}" -eq 0 ]]; then
-      printf 'Service head pod request succeeded via %s\n' "${pod}" >> "${tunnel_log}"
+      printf 'Service head pod request succeeded via %s\n' "${pod}" >>"${tunnel_log}"
       return 0
     fi
 
-    printf 'Service head pod request via %s failed with exit code %s\n' "${pod}" "${curl_exit}" >> "${tunnel_log}"
-  done <<< "${pod_list}"
+    printf 'Service head pod request via %s failed with exit code %s\n' "${pod}" "${curl_exit}" >>"${tunnel_log}"
+  done <<<"${pod_list}"
 
   return 1
 }
@@ -8004,7 +8239,7 @@ curl_anyscale_service_endpoint() {
   curl_exit=0
   set +e
   if [[ "${method}" == "GET" ]]; then
-    curl -fSs --connect-timeout 20 --max-time 60 "${auth_header[@]}" "${service_url}" -o "${response_file}" 2> "${stderr_file}"
+    curl -fSs --connect-timeout 20 --max-time 60 "${auth_header[@]}" "${service_url}" -o "${response_file}" 2>"${stderr_file}"
     curl_exit=$?
   else
     curl -fSs \
@@ -8015,7 +8250,7 @@ curl_anyscale_service_endpoint() {
       -H 'Content-Type: application/json' \
       --data "${request_body}" \
       "${service_url}" \
-      -o "${response_file}" 2> "${stderr_file}"
+      -o "${response_file}" 2>"${stderr_file}"
     curl_exit=$?
   fi
   set -e
@@ -8044,11 +8279,11 @@ wait_for_anyscale_service_runtime_head_pod() {
     fi
 
     current_epoch="$(date +%s)"
-    if (( current_epoch - start_epoch >= timeout_seconds )); then
+    if ((current_epoch - start_epoch >= timeout_seconds)); then
       return 1
     fi
 
-    printf 'Waiting for service runtime head pod for %s\n' "${service_name}" >> "${wait_log}"
+    printf 'Waiting for service runtime head pod for %s\n' "${service_name}" >>"${wait_log}"
     sleep 10
   done
 }
@@ -8072,10 +8307,10 @@ run_anyscale_service_k8s_fallback() {
 
   fallback_log="${services_dir}/${service_name}.fallback.log"
   remote_dir="/tmp/anyscale-service-fallback-${service_name}"
-  : > "${fallback_log}"
+  : >"${fallback_log}"
 
-  head_pod="$(wait_for_anyscale_service_runtime_head_pod "${service_name}" "${namespace}" "${ANYSCALE_SERVICE_PROOF_FALLBACK_WAIT_SECONDS:-420}" "${fallback_log}")" \
-    || die "Service ${service_name} did not expose a running runtime head pod for fallback. See ${fallback_log}."
+  head_pod="$(wait_for_anyscale_service_runtime_head_pod "${service_name}" "${namespace}" "${ANYSCALE_SERVICE_PROOF_FALLBACK_WAIT_SECONDS:-420}" "${fallback_log}")" ||
+    die "Service ${service_name} did not expose a running runtime head pod for fallback. See ${fallback_log}."
 
   model_json_b64="$(printf '%s' "${model_json}" | base64 | tr -d '\n')"
   marker_b64="$(printf '%s' "${success_marker}" | base64 | tr -d '\n')"
@@ -8084,7 +8319,8 @@ run_anyscale_service_k8s_fallback() {
     kubectl exec -n "${namespace}" -c ray "${head_pod}" -- mkdir -p "${remote_dir}"
   copy_workload_proofs_to_pod "${namespace}" "${head_pod}" "${remote_dir}"
 
-  remote_command="$(cat <<EOF
+  remote_command="$(
+    cat <<EOF
 set -euo pipefail
 cd $(shell_join "${remote_dir}")
 export ANYSCALE_PROOF_USE_GPU=1
@@ -8120,25 +8356,25 @@ else:
     raise SystemExit("fallback service did not become healthy")
 PY
 EOF
-)"
+  )"
 
   run_with_timeout "${WORKLOAD_COMMAND_TIMEOUT_SECONDS}" \
     kubectl exec -n "${namespace}" -c ray "${head_pod}" -- \
-      bash -lc "${remote_command}" \
-    > "${fallback_log}" 2>&1 \
-    || die "Kubernetes-backed service fallback for ${service_name} failed. See ${fallback_log}."
+    bash -lc "${remote_command}" \
+    >"${fallback_log}" 2>&1 ||
+    die "Kubernetes-backed service fallback for ${service_name} failed. See ${fallback_log}."
 
   curl_anyscale_service_via_head_pod GET "${service_name}" 'http://127.0.0.1:8000/' '' "${health_log}" "${stderr_log}" "${tunnel_log}"
-  jq -e --arg marker "${success_marker}" '.marker == $marker and (.metrics.accuracy // 0) >= 0.99' "${health_log}" >/dev/null \
-    || die "Service proof ${service_name} fallback health response was unexpected. See ${health_log}."
+  jq -e --arg marker "${success_marker}" '.marker == $marker and (.metrics.accuracy // 0) >= 0.99' "${health_log}" >/dev/null ||
+    die "Service proof ${service_name} fallback health response was unexpected. See ${health_log}."
 
   curl_anyscale_service_via_head_pod POST "${service_name}" 'http://127.0.0.1:8000/' "${positive_payload}" "${positive_log}" "${stderr_log}" "${tunnel_log}"
-  jq -e --arg marker "${success_marker}" --argjson expected "${positive_expected}" '.marker == $marker and .label == $expected' "${positive_log}" >/dev/null \
-    || die "Service proof ${service_name} fallback positive prediction was unexpected. See ${positive_log}."
+  jq -e --arg marker "${success_marker}" --argjson expected "${positive_expected}" '.marker == $marker and .label == $expected' "${positive_log}" >/dev/null ||
+    die "Service proof ${service_name} fallback positive prediction was unexpected. See ${positive_log}."
 
   curl_anyscale_service_via_head_pod POST "${service_name}" 'http://127.0.0.1:8000/' "${negative_payload}" "${negative_log}" "${stderr_log}" "${tunnel_log}"
-  jq -e --arg marker "${success_marker}" --argjson expected "${negative_expected}" '.marker == $marker and .label == $expected' "${negative_log}" >/dev/null \
-    || die "Service proof ${service_name} fallback negative prediction was unexpected. See ${negative_log}."
+  jq -e --arg marker "${success_marker}" --argjson expected "${negative_expected}" '.marker == $marker and .label == $expected' "${negative_log}" >/dev/null ||
+    die "Service proof ${service_name} fallback negative prediction was unexpected. See ${negative_log}."
 
   log "Service ${service_name} printed ${success_marker} via Kubernetes-backed fallback. Diagnostics: ${services_dir}"
 }
@@ -8212,21 +8448,21 @@ run_anyscale_service_proof() {
     write_export_env_script "${env_file}" "${auth_env_specs[@]}"
     run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_WORKSPACE_COMMAND_SECONDS}" \
       kubectl cp -n "${namespace}" -c ray \
-        "${env_file}" \
-        "${head_pod}:${remote_env_path}"
+      "${env_file}" \
+      "${head_pod}:${remote_env_path}"
     run_with_timeout "${SETUP_TIMEOUT_ANYSCALE_WORKSPACE_COMMAND_SECONDS}" \
       kubectl exec -n "${namespace}" -c ray "${head_pod}" -- \
-        bash -lc "source $(shell_join "${remote_env_path}") && cd $(shell_join "${remote_dir}") && $(workspace_anyscale_cli_upgrade_script)" 2>&1 | tee "${services_dir}/${service_name}.cli-upgrade.log"
+      bash -lc "source $(shell_join "${remote_env_path}") && cd $(shell_join "${remote_dir}") && $(workspace_anyscale_cli_upgrade_script)" 2>&1 | tee "${services_dir}/${service_name}.cli-upgrade.log"
   fi
 
   deploy_cmd=(
     service deploy
-      --name "${service_name}"
-      --compute-config "${compute_config_name}"
-      --working-dir "${submit_working_dir}"
-      --cloud "${ANYSCALE_CLOUD_NAME}"
-      --env 'ANYSCALE_PROOF_USE_GPU=1'
-      --env "GPU_TRAIN_MODEL_JSON=${model_json}"
+    --name "${service_name}"
+    --compute-config "${compute_config_name}"
+    --working-dir "${submit_working_dir}"
+    --cloud "${ANYSCALE_CLOUD_NAME}"
+    --env 'ANYSCALE_PROOF_USE_GPU=1'
+    --env "GPU_TRAIN_MODEL_JSON=${model_json}"
   )
   image_runtime_flags=()
   if custom_image_enabled; then
@@ -8241,7 +8477,8 @@ run_anyscale_service_proof() {
   fi
   deploy_command="$(shell_join "${deploy_cmd[@]}")"
   if [[ "${submit_from_workspace}" == true ]]; then
-    remote_command="$(cat <<EOF
+    remote_command="$(
+      cat <<EOF
 set -euo pipefail
 source $(shell_join "${remote_env_path}")
 cd $(shell_join "${remote_dir}")
@@ -8260,14 +8497,14 @@ EOF
   if [[ "${submit_from_workspace}" == true ]]; then
     run_with_timeout "${WORKLOAD_COMMAND_TIMEOUT_SECONDS}" \
       kubectl exec -n "${namespace}" -c ray "${head_pod}" -- \
-        bash -lc "${remote_command}" 2>&1 \
-        | sed -E 's/(Authorization: Bearer )[A-Za-z0-9._-]+/\1<redacted>/g' \
-        | tee "${deploy_log}"
+      bash -lc "${remote_command}" 2>&1 |
+      sed -E 's/(Authorization: Bearer )[A-Za-z0-9._-]+/\1<redacted>/g' |
+      tee "${deploy_log}"
   else
     ANYSCALE_HOST="${ANYSCALE_HOST}" run_with_timeout "${WORKLOAD_COMMAND_TIMEOUT_SECONDS}" \
-      "${deploy_cmd[@]}" 2>&1 \
-      | sed -E 's/(Authorization: Bearer )[A-Za-z0-9._-]+/\1<redacted>/g' \
-      | tee "${deploy_log}"
+      "${deploy_cmd[@]}" 2>&1 |
+      sed -E 's/(Authorization: Bearer )[A-Za-z0-9._-]+/\1<redacted>/g' |
+      tee "${deploy_log}"
   fi
   deploy_exit=${PIPESTATUS[0]}
   set -e
@@ -8308,30 +8545,28 @@ EOF
       "${tunnel_log}" \
       "${namespace}" \
       "${services_dir}"
-    WORKLOAD_LAST_SERVICE_STATUS_LOG="${status_log}"
     return 0
   fi
 
   service_url="$(extract_anyscale_service_url "${status_log}")" || die "Could not find a service URL in ${status_log}."
   service_auth_token="$(jq -r '.query_auth_token // ""' "${status_log}")"
   redact_anyscale_service_status_file "${status_log}"
-  printf '%s\n' "${service_url}" > "${service_url_file}"
+  printf '%s\n' "${service_url}" >"${service_url_file}"
 
   validate_gateway_tls_lifecycle true
 
   curl_anyscale_service_endpoint GET "${service_name}" "${service_url}" '' "${health_log}" "${stderr_log}" "${tunnel_log}" "${service_auth_token}"
-  jq -e --arg marker "${success_marker}" '.marker == $marker and (.metrics.accuracy // 0) >= 0.99' "${health_log}" >/dev/null \
-    || die "Service proof ${service_name} health response was unexpected. See ${health_log}."
+  jq -e --arg marker "${success_marker}" '.marker == $marker and (.metrics.accuracy // 0) >= 0.99' "${health_log}" >/dev/null ||
+    die "Service proof ${service_name} health response was unexpected. See ${health_log}."
 
   curl_anyscale_service_endpoint POST "${service_name}" "${service_url}" "${positive_payload}" "${positive_log}" "${stderr_log}" "${tunnel_log}" "${service_auth_token}"
-  jq -e --arg marker "${success_marker}" --argjson expected "${positive_expected}" '.marker == $marker and .label == $expected' "${positive_log}" >/dev/null \
-    || die "Service proof ${service_name} positive prediction was unexpected. See ${positive_log}."
+  jq -e --arg marker "${success_marker}" --argjson expected "${positive_expected}" '.marker == $marker and .label == $expected' "${positive_log}" >/dev/null ||
+    die "Service proof ${service_name} positive prediction was unexpected. See ${positive_log}."
 
   curl_anyscale_service_endpoint POST "${service_name}" "${service_url}" "${negative_payload}" "${negative_log}" "${stderr_log}" "${tunnel_log}" "${service_auth_token}"
-  jq -e --arg marker "${success_marker}" --argjson expected "${negative_expected}" '.marker == $marker and .label == $expected' "${negative_log}" >/dev/null \
-    || die "Service proof ${service_name} negative prediction was unexpected. See ${negative_log}."
+  jq -e --arg marker "${success_marker}" --argjson expected "${negative_expected}" '.marker == $marker and .label == $expected' "${negative_log}" >/dev/null ||
+    die "Service proof ${service_name} negative prediction was unexpected. See ${negative_log}."
 
-  WORKLOAD_LAST_SERVICE_STATUS_LOG="${status_log}"
   log "Service ${service_name} printed ${success_marker}. URL: ${service_url}. Diagnostics: ${services_dir}"
 }
 
@@ -8372,9 +8607,9 @@ workload_build_stage() {
     "CPU_BUILD_JOB_PROOF_OK"
 
   manifest_file="$(workload_build_manifest_file)"
-  WORKLOAD_BUILD_MANIFEST_JSON="$(extract_prefixed_value_from_log 'CPU_BUILD_MANIFEST_JSON=' "${WORKLOAD_LAST_JOB_OUTPUT_LOG}")" \
-    || die "Build job proof did not emit CPU_BUILD_MANIFEST_JSON=. See ${WORKLOAD_LAST_JOB_OUTPUT_LOG}."
-  printf '%s\n' "${WORKLOAD_BUILD_MANIFEST_JSON}" > "${manifest_file}"
+  WORKLOAD_BUILD_MANIFEST_JSON="$(extract_prefixed_value_from_log 'CPU_BUILD_MANIFEST_JSON=' "${WORKLOAD_LAST_JOB_OUTPUT_LOG}")" ||
+    die "Build job proof did not emit CPU_BUILD_MANIFEST_JSON=. See ${WORKLOAD_LAST_JOB_OUTPUT_LOG}."
+  printf '%s\n' "${WORKLOAD_BUILD_MANIFEST_JSON}" >"${manifest_file}"
 }
 
 workload_train_stage() {
@@ -8384,7 +8619,7 @@ workload_train_stage() {
 
   manifest_file="$(workload_build_manifest_file)"
   if [[ -z "${WORKLOAD_BUILD_MANIFEST_JSON:-}" && -f "${manifest_file}" ]]; then
-    WORKLOAD_BUILD_MANIFEST_JSON="$(tr -d '\n' < "${manifest_file}")"
+    WORKLOAD_BUILD_MANIFEST_JSON="$(tr -d '\n' <"${manifest_file}")"
   fi
   [[ -n "${WORKLOAD_BUILD_MANIFEST_JSON:-}" ]] || die "Build manifest is missing; run the build proof stage before the train proof stage."
 
@@ -8400,9 +8635,9 @@ workload_train_stage() {
     "CPU_BUILD_MANIFEST_JSON=${WORKLOAD_BUILD_MANIFEST_JSON}"
 
   model_file="$(workload_train_model_file)"
-  WORKLOAD_TRAIN_MODEL_JSON="$(extract_prefixed_value_from_log 'GPU_TRAIN_MODEL_JSON=' "${WORKLOAD_LAST_JOB_OUTPUT_LOG}")" \
-    || die "Train job proof did not emit GPU_TRAIN_MODEL_JSON=. See ${WORKLOAD_LAST_JOB_OUTPUT_LOG}."
-  printf '%s\n' "${WORKLOAD_TRAIN_MODEL_JSON}" > "${model_file}"
+  WORKLOAD_TRAIN_MODEL_JSON="$(extract_prefixed_value_from_log 'GPU_TRAIN_MODEL_JSON=' "${WORKLOAD_LAST_JOB_OUTPUT_LOG}")" ||
+    die "Train job proof did not emit GPU_TRAIN_MODEL_JSON=. See ${WORKLOAD_LAST_JOB_OUTPUT_LOG}."
+  printf '%s\n' "${WORKLOAD_TRAIN_MODEL_JSON}" >"${model_file}"
 }
 
 workload_service_stage() {
@@ -8410,7 +8645,7 @@ workload_service_stage() {
 
   model_file="$(workload_train_model_file)"
   if [[ -z "${WORKLOAD_TRAIN_MODEL_JSON:-}" && -f "${model_file}" ]]; then
-    WORKLOAD_TRAIN_MODEL_JSON="$(tr -d '\n' < "${model_file}")"
+    WORKLOAD_TRAIN_MODEL_JSON="$(tr -d '\n' <"${model_file}")"
   fi
   [[ -n "${WORKLOAD_TRAIN_MODEL_JSON:-}" ]] || die "Train model payload is missing; run the train proof stage before the service proof stage."
 
@@ -8448,7 +8683,7 @@ workload_custom_image_failure_stage() {
   set +e
   run_with_timeout "${WORKLOAD_COMMAND_TIMEOUT_SECONDS}" \
     kubectl exec -n "${namespace}" -c ray "${head_pod}" -- \
-      bash -lc "cd '${remote_dir}' && python -m pip install --no-cache-dir '${requirement}' && python '${script_name}'" 2>&1 | tee "${output_log}"
+    bash -lc "cd '${remote_dir}' && python -m pip install --no-cache-dir '${requirement}' && python '${script_name}'" 2>&1 | tee "${output_log}"
   proof_exit=${PIPESTATUS[0]}
   set -e
 
@@ -8529,7 +8764,7 @@ USAGE
         WORKLOAD_COMMAND_TIMEOUT_SECONDS="$2"
         shift 2
         ;;
-      --help|-h)
+      --help | -h)
         cat <<'USAGE'
 Usage:
   ./scripts/setup.sh workload proof {cpu|gpu|pipeline|all|custom-image-failure|custom-image} [--command-timeout-seconds N]
@@ -8554,11 +8789,13 @@ USAGE
       run_stage "cpu-proof" workload_cpu_stage
       ;;
     gpu)
+      gpu_workloads_enabled || die "GPU proof is unavailable because TF_VAR_gpu_pool_configs does not configure a GPU node pool."
       setup_run_init "workload-gpu" 2
       run_stage "prepare" workload_prepare_stage
       run_stage "gpu-proof" workload_gpu_stage
       ;;
     pipeline)
+      gpu_workloads_enabled || die "The build/train/serve pipeline requires a GPU node pool, but TF_VAR_gpu_pool_configs is empty. Run 'workload proof all' for all CPU-supported proofs."
       workload_pipeline_preflight
       setup_run_init "workload-pipeline" 4
       WORKLOAD_BUILD_JOB_NAME="$(workload_name_with_run_suffix "${WORKLOAD_BUILD_JOB_BASENAME}")"
@@ -8571,16 +8808,24 @@ USAGE
       ;;
     all)
       workload_pipeline_preflight
-      setup_run_init "workload-all" 6
       WORKLOAD_BUILD_JOB_NAME="$(workload_name_with_run_suffix "${WORKLOAD_BUILD_JOB_BASENAME}")"
-      WORKLOAD_TRAIN_JOB_NAME="$(workload_name_with_run_suffix "${WORKLOAD_TRAIN_JOB_BASENAME}")"
-      WORKLOAD_SERVICE_NAME="$(workload_name_with_run_suffix "${WORKLOAD_SERVICE_BASENAME}")"
-      run_stage "prepare" workload_prepare_stage
-      run_stage "cpu-proof" workload_cpu_stage
-      run_stage "gpu-proof" workload_gpu_stage
-      run_stage "build-job-proof" workload_build_stage
-      run_stage "train-job-proof" workload_train_stage
-      run_stage "serve-service-proof" workload_service_stage
+      if gpu_workloads_enabled; then
+        setup_run_init "workload-all" 6
+        WORKLOAD_TRAIN_JOB_NAME="$(workload_name_with_run_suffix "${WORKLOAD_TRAIN_JOB_BASENAME}")"
+        WORKLOAD_SERVICE_NAME="$(workload_name_with_run_suffix "${WORKLOAD_SERVICE_BASENAME}")"
+        run_stage "prepare" workload_prepare_stage
+        run_stage "cpu-proof" workload_cpu_stage
+        run_stage "gpu-proof" workload_gpu_stage
+        run_stage "build-job-proof" workload_build_stage
+        run_stage "train-job-proof" workload_train_stage
+        run_stage "serve-service-proof" workload_service_stage
+      else
+        setup_run_init "workload-all" 3
+        run_stage "prepare" workload_prepare_stage
+        run_stage "cpu-proof" workload_cpu_stage
+        run_stage "build-job-proof" workload_build_stage
+        log "GPU Ray, train-job, and serve-service proofs are skipped because no GPU node pool is configured."
+      fi
       ;;
     custom-image-failure)
       setup_run_init "custom-image-failure" 2
@@ -8653,7 +8898,7 @@ custom_image() {
       export ANYSCALE_CUSTOM_IMAGE_ENABLED=true
       workload proof custom-image "${@:2}"
       ;;
-    --help|-h|"")
+    --help | -h | "")
       cat <<'USAGE'
 Usage:
   ./scripts/setup.sh custom-image preflight
@@ -8688,7 +8933,7 @@ image_integrity() {
       run_stage "apply-ratify" image_integrity_apply_ratify
       setup_run_summary
       ;;
-    --help|-h|"")
+    --help | -h | "")
       cat <<'USAGE'
 Usage:
   ./scripts/setup.sh image-integrity preflight
@@ -8722,8 +8967,8 @@ check_terraform_lock_state() {
     die "Terraform state lock present (${lock_info}). Another Terraform run may be active. Resolve the lock before teardown."
   fi
 
-  if command -v git >/dev/null 2>&1 \
-    && ! git -C "${ROOT_DIR}" diff --quiet -- "${lock_hcl}" >/dev/null 2>&1; then
+  if command -v git >/dev/null 2>&1 &&
+    ! git -C "${ROOT_DIR}" diff --quiet -- "${lock_hcl}" >/dev/null 2>&1; then
     warn "Uncommitted local changes detected in ${lock_hcl}; provider lock may differ from the committed version."
   fi
 }
@@ -8756,20 +9001,8 @@ write_teardown_evidence() {
       terraform_exit_code: $terraform_exit_code,
       remaining_state_count: $remaining_state_count,
       resource_group_exists: $resource_group_exists
-    }' > "${evidence_file}"
+    }' >"${evidence_file}"
   log "Teardown evidence: ${evidence_file}"
-}
-
-_teardown_destroy_progress_ticker() {
-  local start_epoch="$1"
-  local now elapsed
-
-  while true; do
-    sleep 60
-    now="$(date +%s)"
-    elapsed=$((now - start_epoch))
-    log "Terraform destroy still running (${elapsed}s elapsed). Key Vault purge and Azure Firewall deallocation are typical long poles."
-  done
 }
 
 teardown_std_drain() {
@@ -8777,21 +9010,17 @@ teardown_std_drain() {
 }
 
 teardown_std_terraform_destroy() {
-  local terraform_exit_code=0 ticker_pid start_epoch attempt
+  local terraform_exit_code=0 attempt
   local exitcode_file="${SETUP_RUN_DIR}/terraform-destroy.exitcode"
-  local resource_group remaining_count rg_exists stage_log
+  local activity_log resource_group remaining_count rg_exists stage_log
   local max_attempts="${SETUP_TERRAFORM_DESTROY_RETRY_ATTEMPTS:-3}"
   local delay_seconds="${SETUP_TERRAFORM_DESTROY_RETRY_DELAY_SECONDS:-30}"
 
-  warn "Terraform destroy can run long; Key Vault purge and Azure Firewall deallocation are typical long poles."
+  warn "Terraform destroy can run long. Azure Firewall deallocation and cross-tenant Private Endpoint deletion are typical long poles."
   stage_log="${SETUP_STAGE_LOG_DIR}/$(printf '%02d' "${SETUP_STAGE_INDEX}")-terraform-destroy.log"
 
-  for (( attempt = 1; attempt <= max_attempts; attempt++ )); do
+  for ((attempt = 1; attempt <= max_attempts; attempt++)); do
     log "Starting Terraform destroy (attempt ${attempt}/${max_attempts}, timeout ${SETUP_TIMEOUT_TERRAFORM_DESTROY_SECONDS}s)."
-
-    start_epoch="$(date +%s)"
-    _teardown_destroy_progress_ticker "${start_epoch}" &
-    ticker_pid=$!
 
     set +e
     run_with_timeout "${SETUP_TIMEOUT_TERRAFORM_DESTROY_SECONDS}" \
@@ -8799,15 +9028,12 @@ teardown_std_terraform_destroy() {
     terraform_exit_code=$?
     set -e
 
-    kill "${ticker_pid}" >/dev/null 2>&1 || true
-    wait "${ticker_pid}" 2>/dev/null || true
-
-    if (( terraform_exit_code == 0 )); then
+    if ((terraform_exit_code == 0)); then
       break
     fi
 
     if [[ -f "${stage_log}" ]] && grep -Eqi 'AnotherOperationInProgress|Operation.*in progress|RetryableError' "${stage_log}"; then
-      if (( attempt < max_attempts )); then
+      if ((attempt < max_attempts)); then
         warn "Terraform destroy hit a transient Azure operation-in-progress conflict (attempt ${attempt}/${max_attempts}); retrying in ${delay_seconds}s."
         sleep "${delay_seconds}"
         continue
@@ -8817,14 +9043,29 @@ teardown_std_terraform_destroy() {
     break
   done
 
-  printf '%s\n' "${terraform_exit_code}" > "${exitcode_file}"
+  printf '%s\n' "${terraform_exit_code}" >"${exitcode_file}"
 
   resource_group="$(resource_group_name)"
   remaining_count="$(terraform state list 2>/dev/null | grep -c . || true)"
   rg_exists="$(az group exists --name "${resource_group}" --output tsv --only-show-errors 2>/dev/null || printf 'unknown')"
 
-  if (( terraform_exit_code != 0 )); then
+  if ((terraform_exit_code != 0)); then
     warn "Terraform destroy failed with exit code ${terraform_exit_code}."
+    if [[ -f "${stage_log}" ]] && grep -Eqi 'Private Endpoint.*context deadline exceeded|deleting Private Endpoint.*context deadline exceeded' "${stage_log}"; then
+      activity_log="$(run_with_timeout "${SETUP_TIMEOUT_AZURE_COMMAND_SECONDS}" \
+        az monitor activity-log list \
+        --resource-group "${resource_group}" \
+        --offset 2h \
+        --status Failed \
+        --query '[].properties.statusMessage' \
+        --output tsv \
+        --only-show-errors 2>/dev/null || true)"
+      if grep -q 'ScopeLocked' <<<"${activity_log}"; then
+        warn "Anyscale's Private Link service scope is locked, so Azure cannot delete the connection proxy. Contact Anyscale Support; retries and resource-group deletion cannot resolve a lock in Anyscale's subscription."
+      else
+        warn "Azure did not finish deleting a Private Endpoint within its Terraform timeout. Retry teardown after checking the endpoint state, or use teardown --force --yes for the dedicated resource group."
+      fi
+    fi
     if [[ -f "${stage_log}" ]]; then
       warn "Last 30 lines of ${stage_log}:"
       tail -n 30 "${stage_log}" >&2 || true
@@ -8851,7 +9092,7 @@ teardown_std_post_destroy_check() {
   remaining_state_file="${SETUP_RUN_DIR}/terraform-state-after-destroy.txt"
 
   if remaining_state="$(terraform state list 2>/dev/null)" && [[ -n "${remaining_state}" ]]; then
-    printf '%s\n' "${remaining_state}" > "${remaining_state_file}"
+    printf '%s\n' "${remaining_state}" >"${remaining_state_file}"
     rg_exists="$(az group exists --name "${resource_group}" --output tsv --only-show-errors 2>/dev/null || printf 'unknown')"
     write_teardown_evidence "${SETUP_RUN_DIR}" "post-destroy-state-check" "${terraform_exit_code}" \
       "$(printf '%s\n' "${remaining_state}" | grep -c . || true)" "${rg_exists}"
@@ -8869,9 +9110,10 @@ teardown_std_post_destroy_check() {
 }
 
 ###############################################################################
-# Superseded by the staged standard teardown (teardown_std_drain,
-# teardown_std_terraform_destroy, teardown_std_post_destroy_check). Retained for
-# reference and ad-hoc use; teardown() no longer calls this function.
+# Unreferenced helper kept for ad-hoc use. The staged teardown path
+# (teardown_std_drain, teardown_std_terraform_destroy,
+# teardown_std_post_destroy_check) owns the destroy flow, and no dispatch
+# routes here.
 ###############################################################################
 destroy() {
   local destroy_postcheck_error="" remaining_state remaining_state_file resource_group terraform_exit_code
@@ -8891,13 +9133,13 @@ destroy() {
   terraform_exit_code=$?
   set -e
 
-  if (( terraform_exit_code != 0 )); then
+  if ((terraform_exit_code != 0)); then
     destroy_postcheck_error="Terraform destroy failed with exit code ${terraform_exit_code}."
   fi
 
   remaining_state_file="${SETUP_RUN_DIR}/terraform-state-after-destroy.txt"
   if remaining_state="$(terraform state list 2>/dev/null)" && [[ -n "${remaining_state}" ]]; then
-    printf '%s\n' "${remaining_state}" > "${remaining_state_file}"
+    printf '%s\n' "${remaining_state}" >"${remaining_state_file}"
     if [[ -n "${destroy_postcheck_error}" ]]; then
       destroy_postcheck_error="${destroy_postcheck_error} Terraform state still contains resources. See ${remaining_state_file}."
     else
@@ -8908,7 +9150,7 @@ destroy() {
   bastion_tunnel stop >/dev/null 2>&1 || true
   clear_anyscale_cloud_deployment_id
 
-  if [[ -z "${destroy_postcheck_error}" ]] && (( terraform_exit_code == 0 )); then
+  if [[ -z "${destroy_postcheck_error}" ]] && ((terraform_exit_code == 0)); then
     log "Waiting for ${resource_group} deletion to complete"
     wait_for_resource_group_deletion "${resource_group}"
   fi
@@ -8951,9 +9193,9 @@ force_teardown_drain_anyscale_cloud() {
   SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS="${SETUP_TIMEOUT_ANYSCALE_COMMAND_SECONDS}" \
     SETUP_TIMEOUT_AZURE_COMMAND_SECONDS="${SETUP_TIMEOUT_AZURE_COMMAND_SECONDS}" \
     run_with_timeout 2400 \
-      "${ANYSCALE_CLOUD_TEARDOWN_SCRIPT}" \
-      --timeout-seconds 1800 \
-      --poll-interval-seconds 20
+    "${ANYSCALE_CLOUD_TEARDOWN_SCRIPT}" \
+    --timeout-seconds 1800 \
+    --poll-interval-seconds 20
 }
 
 wait_for_resource_group_deletion() {
@@ -8963,12 +9205,12 @@ wait_for_resource_group_deletion() {
   local remaining_count=""
   local remaining_names=""
 
-  while (( attempt <= max_attempts )); do
+  while ((attempt <= max_attempts)); do
     if [[ "$(az group exists --name "${resource_group}" --output tsv --only-show-errors 2>/dev/null || printf 'true')" == "false" ]]; then
       return 0
     fi
 
-    if (( attempt == 1 || attempt % 6 == 0 )); then
+    if ((attempt == 1 || attempt % 6 == 0)); then
       remaining_count="$(az resource list \
         --resource-group "${resource_group}" \
         --query 'length(@)' \
@@ -9003,11 +9245,11 @@ nuke() {
   local force=false
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --yes|-y)
+      --yes | -y)
         force=true
         shift
         ;;
-      --help|-h)
+      --help | -h)
         cat <<'USAGE'
 Usage:
   ./scripts/setup.sh nuke
@@ -9064,7 +9306,7 @@ teardown() {
         force=true
         shift
         ;;
-      --yes|-y)
+      --yes | -y)
         yes=true
         shift
         ;;
@@ -9073,7 +9315,7 @@ teardown() {
         confirm_project="$2"
         shift 2
         ;;
-      --help|-h)
+      --help | -h)
         cat <<'USAGE'
 Usage:
   ./scripts/setup.sh teardown
@@ -9110,8 +9352,8 @@ USAGE
   render_tfvars
 
   if [[ -n "${confirm_project}" ]]; then
-    [[ "${confirm_project}" == "${TF_VAR_project}" ]] \
-      || die "--confirm-project '${confirm_project}' does not match project '${TF_VAR_project}'."
+    [[ "${confirm_project}" == "${TF_VAR_project}" ]] ||
+      die "--confirm-project '${confirm_project}' does not match project '${TF_VAR_project}'."
   else
     warn "Tearing down ALL resources in the workspace."
     read -r -p "Type the project name to confirm teardown: " confirm
@@ -9142,7 +9384,7 @@ idempotency_write_summaries() {
     tail -n +2 "${IDEMPOTENCY_SUMMARY_TSV}" | while IFS=$'\t' read -r stage_name stage_result duration_seconds log_file; do
       printf '| `%s` | %s | %ss | `%s` |\n' "${stage_name}" "${stage_result}" "${duration_seconds}" "${log_file}"
     done
-  } > "${IDEMPOTENCY_SUMMARY_MD}"
+  } >"${IDEMPOTENCY_SUMMARY_MD}"
 
   {
     printf '{\n'
@@ -9163,10 +9405,10 @@ idempotency_write_summaries() {
         "$(printf '%s' "${stage_result}" | jq -R .)" \
         "${duration_seconds}" \
         "$(printf '%s' "${log_file}" | jq -R .)"
-    done < "${IDEMPOTENCY_SUMMARY_TSV}"
+    done <"${IDEMPOTENCY_SUMMARY_TSV}"
     printf '\n  ]\n'
     printf '}\n'
-  } > "${IDEMPOTENCY_SUMMARY_JSON}"
+  } >"${IDEMPOTENCY_SUMMARY_JSON}"
 }
 
 idempotency_run_stage() {
@@ -9179,7 +9421,10 @@ idempotency_run_stage() {
   printf '[idempotency] %s started\n' "${stage_name}"
 
   set +e
-  ( set -e; "$@" ) 2>&1 | tee "${log_file}"
+  (
+    set -e
+    "$@"
+  ) 2>&1 | tee "${log_file}"
   exit_code=${PIPESTATUS[0]}
   set -e
 
@@ -9188,12 +9433,12 @@ idempotency_run_stage() {
 
   if [[ "${exit_code}" -eq 0 ]]; then
     printf '[idempotency] %s ok (%ss)\n' "${stage_name}" "${duration_seconds}"
-    printf '%s\tPASS\t%s\t%s\n' "${stage_name}" "${duration_seconds}" "${log_file}" >> "${IDEMPOTENCY_SUMMARY_TSV}"
+    printf '%s\tPASS\t%s\t%s\n' "${stage_name}" "${duration_seconds}" "${log_file}" >>"${IDEMPOTENCY_SUMMARY_TSV}"
     return 0
   fi
 
   printf '[idempotency] %s failed (%ss). See %s\n' "${stage_name}" "${duration_seconds}" "${log_file}" >&2
-  printf '%s\tFAIL\t%s\t%s\n' "${stage_name}" "${duration_seconds}" "${log_file}" >> "${IDEMPOTENCY_SUMMARY_TSV}"
+  printf '%s\tFAIL\t%s\t%s\n' "${stage_name}" "${duration_seconds}" "${log_file}" >>"${IDEMPOTENCY_SUMMARY_TSV}"
   idempotency_write_summaries
   return "${exit_code}"
 }
@@ -9252,7 +9497,7 @@ idempotency() {
         skip_workload=true
         shift
         ;;
-      --help|-h)
+      --help | -h)
         cat <<'USAGE'
 Usage:
   ./scripts/setup.sh idempotency
@@ -9289,7 +9534,7 @@ USAGE
   IDEMPOTENCY_SUMMARY_JSON="${IDEMPOTENCY_RUN_DIR}/summary.json"
 
   mkdir -p "${IDEMPOTENCY_LOG_DIR}"
-  printf 'stage\tresult\tduration_seconds\tlog\n' > "${IDEMPOTENCY_SUMMARY_TSV}"
+  printf 'stage\tresult\tduration_seconds\tlog\n' >"${IDEMPOTENCY_SUMMARY_TSV}"
 
   idempotency_run_stage "deploy-first" "${setup_script}" deploy
   idempotency_run_stage "verify-first" "${setup_script}" verify --full
@@ -9318,26 +9563,30 @@ USAGE
 
 ###############################################################################
 main() {
-  local cmd="${1:-}"
+  local command_name="${1:-}"
 
-  case "${cmd}" in
-    ""|--help|-h)
+  case "${command_name}" in
+    "" | --help | -h)
       cat <<'USAGE'
 Usage: ./scripts/setup.sh COMMAND [ARGS]
 
-Compatibility entry point. Prefer ./scripts/anyscale-aks.sh for new workflows.
+Internal implementation entry point. Use ./scripts/anyscale-aks.sh for operator workflows.
 
 Commands:
   render
+  test
   deploy [--from-scratch --yes]
+  workspaces-register
   verify [--static|--live|--full] [--skip-observability]
-  workload proof {cpu|gpu|pipeline|all}
-  custom-image {prepare|apply|proof|prove-failure}
+  workload proof {cpu|gpu|pipeline|all|custom-image-failure|custom-image}
+  custom-image {preflight|prepare|sign|verify|sbom|sbom-proof|apply|proof|prove-failure}
+  image-integrity {preflight|apply-ratify}
   idempotency [--skip-workload] [--include-teardown|--include-force-teardown --i-understand-this-deletes-azure-resources]
   teardown [--force] [--yes]
   status
   health
   outputs
+  bastion [--admin]
   bastion-tunnel {start|status|stop}
   kubeconfig-bastion [--admin] [--print-path|--export]
   kubeconfig [--admin]
@@ -9345,29 +9594,102 @@ Commands:
   workspace-browser-open {start|status|stop}
   workspace-head-forward {start|status|stop}
   workspace-head-open {start|status|stop}
+  post
+  functional-test
 USAGE
       ;;
-    render) shift; render_tfvars "$@" ;;
-    deploy) shift; deploy "$@" ;;
-    verify) shift; verify "$@" ;;
-    workload) shift; workload "$@" ;;
-    custom-image) shift; custom_image "$@" ;;
-    image-integrity) shift; image_integrity "$@" ;;
-    idempotency) shift; idempotency "$@" ;;
-    teardown) shift; teardown "$@" ;;
-    status) shift; status "$@" ;;
-    health) shift; health "$@" ;;
-    outputs) shift; outputs "$@" ;;
-    bastion) shift; bastion "$@" ;;
-    bastion-tunnel) shift; bastion_tunnel "$@" ;;
-    kubeconfig-bastion) shift; kubeconfig_bastion "$@" ;;
-    kubeconfig) shift; kubeconfig "$@" ;;
-    workspace-browser-ready) shift; workspace_browser_ready "$@" ;;
-    workspace-browser-open) shift; workspace_browser_open "$@" ;;
-    workspace-head-forward) shift; workspace_head_forward "$@" ;;
-    workspace-head-open) shift; workspace_head_open "$@" ;;
-    post) shift; post "$@" ;;
-    functional-test) shift; functional_test "$@" ;;
+    render)
+      shift
+      render_tfvars "$@"
+      ;;
+    test)
+      shift
+      terraform_contract_tests "$@"
+      ;;
+    deploy)
+      shift
+      deploy "$@"
+      ;;
+    workspaces-register)
+      shift
+      deploy_workspaces_stage "$@"
+      ;;
+    verify)
+      shift
+      verify "$@"
+      ;;
+    workload)
+      shift
+      workload "$@"
+      ;;
+    custom-image)
+      shift
+      custom_image "$@"
+      ;;
+    image-integrity)
+      shift
+      image_integrity "$@"
+      ;;
+    idempotency)
+      shift
+      idempotency "$@"
+      ;;
+    teardown)
+      shift
+      teardown "$@"
+      ;;
+    status)
+      shift
+      status "$@"
+      ;;
+    health)
+      shift
+      health "$@"
+      ;;
+    outputs)
+      shift
+      outputs "$@"
+      ;;
+    bastion)
+      shift
+      bastion "$@"
+      ;;
+    bastion-tunnel)
+      shift
+      bastion_tunnel "$@"
+      ;;
+    kubeconfig-bastion)
+      shift
+      kubeconfig_bastion "$@"
+      ;;
+    kubeconfig)
+      shift
+      kubeconfig "$@"
+      ;;
+    workspace-browser-ready)
+      shift
+      workspace_browser_ready "$@"
+      ;;
+    workspace-browser-open)
+      shift
+      workspace_browser_open "$@"
+      ;;
+    workspace-head-forward)
+      shift
+      workspace_head_forward "$@"
+      ;;
+    workspace-head-open)
+      shift
+      workspace_head_open "$@"
+      ;;
+    post)
+      shift
+      post "$@"
+      ;;
+    functional-test)
+      shift
+      functional_test "$@"
+      ;;
     *) die "Usage: $0 COMMAND [ARGS]" ;;
   esac
 }

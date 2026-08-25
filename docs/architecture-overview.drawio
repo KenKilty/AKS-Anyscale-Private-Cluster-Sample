@@ -1,4 +1,4 @@
-<mxfile host="app.diagrams.net" modified="2026-06-11T00:00:00.000Z" agent="GitHub Copilot" version="24.7.17" type="device">
+<mxfile host="app.diagrams.net" modified="2026-08-24T00:00:00.000Z" agent="GitHub Copilot" version="24.7.17" type="device">
   <diagram id="private-aks-reference" name="High Level Flow">
     <mxGraphModel dx="1500" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1500" pageHeight="900" math="0" shadow="0">
       <root>
@@ -10,16 +10,16 @@
         <mxCell id="title" value="Anyscale private AKS reference architecture on Azure" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Inter,Segoe UI,Arial;fontSize=28;fontStyle=1;fontColor=#111827;" vertex="1" parent="1">
           <mxGeometry x="40" y="28" width="950" height="42" as="geometry"/>
         </mxCell>
-        <mxCell id="subtitle" value="Three-module lab: build the durable foundation (network, Bastion, jump hosts, local state), prepare the in-VNet operator host, then deploy, prove, and tear down the Anyscale lab workload. Detailed views live in the README and docs/modules." style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Inter,Segoe UI,Arial;fontSize=15;fontColor=#475569;" vertex="1" parent="1">
+        <mxCell id="subtitle" value="C4 container view. Five-module lab: build the foundation, prepare the in-VNet Linux jump host, deploy and prove the Anyscale workload, build and sign a custom image, audit image signatures, then clean up. Detailed views: docs/diagrams 02-05." style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Inter,Segoe UI,Arial;fontSize=15;fontColor=#475569;" vertex="1" parent="1">
           <mxGeometry x="40" y="76" width="1340" height="32" as="geometry"/>
         </mxCell>
-        <mxCell id="operator" value="Operator workstation&#xa;az login + Bastion to reach the jump host&#xa;Module commands: module 1 / 2 / 3" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;strokeColor=#CBD5E1;fillColor=#FFFFFF;fontFamily=Inter,Segoe UI,Arial;fontSize=14;fontColor=#111827;align=center;verticalAlign=middle;spacing=8;" vertex="1" parent="1">
+        <mxCell id="operator" value="Operator workstation&#xa;Terraform + Azure CLI + local state&#xa;Foundation, deploy, and teardown" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;strokeColor=#CBD5E1;fillColor=#FFFFFF;fontFamily=Inter,Segoe UI,Arial;fontSize=14;fontColor=#111827;align=center;verticalAlign=middle;spacing=8;" vertex="1" parent="1">
           <mxGeometry x="40" y="390" width="180" height="110" as="geometry"/>
         </mxCell>
         <mxCell id="boundary" value="Azure resource group and private virtual network" style="rounded=1;whiteSpace=wrap;html=1;arcSize=6;strokeColor=#94A3B8;dashed=1;dashPattern=8 4;fillColor=#FFFFFF;fontFamily=Inter,Segoe UI,Arial;fontSize=16;fontStyle=1;fontColor=#334155;align=left;verticalAlign=top;spacingLeft=18;spacingTop=14;" vertex="1" parent="1">
           <mxGeometry x="250" y="140" width="1080" height="680" as="geometry"/>
         </mxCell>
-        <mxCell id="access" value="Foundation (durable)&#xa;Bastion + Linux automation jump host (MI auth)&#xa;Optional Windows browser jump host&#xa;Local Terraform state" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;strokeColor=#2563EB;fillColor=#EFF6FF;fontFamily=Inter,Segoe UI,Arial;fontSize=14;fontColor=#0F172A;align=center;verticalAlign=middle;spacing=8;" vertex="1" parent="1">
+        <mxCell id="access" value="Private operator access&#xa;Bastion + Linux jump host&#xa;Managed-identity authentication&#xa;Optional Windows browser&#xa;jump host" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;strokeColor=#2563EB;fillColor=#EFF6FF;fontFamily=Inter,Segoe UI,Arial;fontSize=14;fontColor=#0F172A;align=center;verticalAlign=middle;spacing=8;" vertex="1" parent="1">
           <mxGeometry x="300" y="360" width="200" height="150" as="geometry"/>
         </mxCell>
         <mxCell id="aks" value="Private AKS data plane&#xa;Private API, system/CPU/GPU pools&#xa;Anyscale operator and durable workspaces" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;strokeColor=#2563EB;fillColor=#FFFFFF;fontFamily=Inter,Segoe UI,Arial;fontSize=14;fontColor=#0F172A;align=center;verticalAlign=middle;spacing=8;" vertex="1" parent="1">
@@ -28,7 +28,7 @@
         <mxCell id="gateway" value="Private Layer 7 data plane&#xa;Gateway API + app-routing Istio&#xa;Workspace browser, Ray dashboard, services" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;strokeColor=#10B981;fillColor=#ECFDF5;fontFamily=Inter,Segoe UI,Arial;fontSize=14;fontColor=#064E3B;align=center;verticalAlign=middle;spacing=8;" vertex="1" parent="1">
           <mxGeometry x="560" y="420" width="250" height="150" as="geometry"/>
         </mxCell>
-        <mxCell id="deps" value="Private dependencies&#xa;ADLS Gen2, ACR, Private Link&#xa;Workload Identity and RBAC" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;strokeColor=#10B981;fillColor=#FFFFFF;fontFamily=Inter,Segoe UI,Arial;fontSize=14;fontColor=#0F172A;align=center;verticalAlign=middle;spacing=8;" vertex="1" parent="1">
+        <mxCell id="deps" value="Private dependencies&#xa;ADLS Gen2, ACR, Key Vault endpoints&#xa;Workload Identity and RBAC" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;strokeColor=#10B981;fillColor=#FFFFFF;fontFamily=Inter,Segoe UI,Arial;fontSize=14;fontColor=#0F172A;align=center;verticalAlign=middle;spacing=8;" vertex="1" parent="1">
           <mxGeometry x="880" y="210" width="240" height="150" as="geometry"/>
         </mxCell>
         <mxCell id="egress" value="Controlled egress and observability&#xa;Azure Firewall, DNS proxy&#xa;Log Analytics, AMPLS, Container Insights" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;strokeColor=#F59E0B;fillColor=#FFF7ED;fontFamily=Inter,Segoe UI,Arial;fontSize=14;fontColor=#0F172A;align=center;verticalAlign=middle;spacing=8;" vertex="1" parent="1">
@@ -43,7 +43,7 @@
         <mxCell id="teardown" value="Teardown and recovery&#xa;Drain services, workspaces, jobs&#xa;Delete Anyscale cloud, then Azure RG" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;strokeColor=#EF4444;fillColor=#FEF2F2;fontFamily=Inter,Segoe UI,Arial;fontSize=14;fontColor=#7F1D1D;align=center;verticalAlign=middle;spacing=8;" vertex="1" parent="1">
           <mxGeometry x="880" y="650" width="240" height="110" as="geometry"/>
         </mxCell>
-        <mxCell id="note" value="The foundation is durable across workload rebuilds; module 3 teardown destroys only the lab workload. The Linux jump host runs Terraform/kubectl/Helm/Podman/Anyscale CLI with managed-identity auth and direct private AKS access. CLI/platform automation uses console.azure.anyscale.com; cloud teardown drains workspaces and services before deleting the Anyscale cloud ARM resource." style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Inter,Segoe UI,Arial;fontSize=12;fontColor=#334155;" vertex="1" parent="1">
+        <mxCell id="note" value="Terraform runs on the operator workstation. The Linux jump host runs private kubectl, Helm, Podman, and Anyscale CLI operations. Cleanup drains Anyscale resources before the single Terraform root destroys the lab." style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Inter,Segoe UI,Arial;fontSize=12;fontColor=#334155;" vertex="1" parent="1">
           <mxGeometry x="40" y="830" width="1340" height="48" as="geometry"/>
         </mxCell>
         <mxCell id="edgeOperatorAccess" value="admin/client" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#2563EB;fontSize=10;fontColor=#1D4ED8;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="operator" target="access">

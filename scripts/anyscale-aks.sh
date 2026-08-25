@@ -1,7 +1,17 @@
 #!/usr/bin/env bash
 # Public command dispatcher for the Anyscale-on-AKS sample.
-# Keep this file focused on routing, help text, and read-only local checks.
-# Core deploy, proof, and teardown behavior is delegated to setup.sh during the refactor.
+#
+# Purpose: the single operator entry point. Keep this file focused on routing,
+#          help text, dependency checks, and read-only local checks. Core
+#          deploy, proof, and teardown behavior is implemented in setup.sh.
+# Usage:   ./scripts/anyscale-aks.sh COMMAND [ARGS]   (run --help for commands)
+#          Runs on the operator workstation, or on the Linux jump host for the
+#          private stages.
+# Inputs:  the repo-root .env exported as TF_VAR_*; cached Azure and Anyscale
+#          CLI auth; optional ANYSCALE_EXECUTION_MODE (workstation|jump-host).
+# Outputs: command output on stdout, run artifacts under
+#          .cache/aks-anyscale-sample-harness/, and a generated root RESULTS.md
+#          for e2e runs; non-zero exit when a stage fails.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -9,6 +19,8 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 SETUP_SCRIPT="${SCRIPT_DIR}/setup.sh"
 DIAGNOSE_WORKSPACE_ARTIFACTS_SCRIPT="${SCRIPT_DIR}/utility/diagnose-workspace-artifacts.py"
 TIMEOUT_SELF_TEST_SCRIPT="${SCRIPT_DIR}/utility/test-timeouts.sh"
+PRIVATELINK_DNS_PROOF_SCRIPT="${SCRIPT_DIR}/privatelink-dns-proof.sh"
+QUALITY_GATE_SCRIPT="${SCRIPT_DIR}/quality-gate.sh"
 TERRAFORM_DIR="${ROOT_DIR}/infra/terraform"
 MODULE_1_SCRIPT="${SCRIPT_DIR}/modules/module-1-foundation.sh"
 MODULE_2_SCRIPT="${SCRIPT_DIR}/modules/module-2-jump-host.sh"
@@ -31,10 +43,15 @@ Learning modules (recommended):
   module 3 {deploy|verify|proof ...|browser validate|teardown}
       Deploy, verify, prove, and tear down the lab workload.
 
-  module 4 {prove-failure|preflight|prepare|apply|proof}
-      Prove the custom-image requirement and build the private-ACR image.
+  module 4 {prove-failure|preflight|prepare|sign|verify|sbom|sbom-proof|apply|proof}
+      Prove the custom-image requirement, then build, sign, and prove the
+      private-ACR image.
 
-Compatibility commands:
+  module 5 {preflight|apply-ratify}
+      Audit signed and unsigned images with AKS Image Integrity. Audit-only:
+      unsigned images are reported non-compliant but still run.
+
+Core commands:
   deploy [--from-scratch --yes]
       Build or reconcile Azure infrastructure, AKS bootstrap, Anyscale platform,
       compute configs, and durable workspaces.
@@ -43,15 +60,17 @@ Compatibility commands:
       Run static and/or live validation.
 
   proof {cpu|gpu|pipeline|all}
-      Run deterministic workload proofs. This is the public alias for the
-      existing workload proof runner.
+      Run deterministic workload proofs. Public alias for the workload proof
+      runner.
 
   custom-image {preflight|prepare|sign|verify|sbom|sbom-proof|apply|proof|prove-failure}
       Build/push the local custom image with Podman, update workspaces, and
       prove the packaged dependency scenario.
 
-  workload proof {cpu|gpu|pipeline|all}
-      Compatibility spelling for proof commands.
+  workload proof {cpu|gpu|pipeline|all|custom-image-failure|custom-image}
+      Run proofs through the workload command namespace. The custom-image
+      targets are also reachable as 'custom-image prove-failure' and
+      'custom-image proof'.
 
   teardown [--force --yes] [--confirm-project <name>]
       Tear down with staged Terraform destroy, or use --force for a
@@ -84,11 +103,21 @@ Compatibility commands:
   diagnose workspace-artifacts [ARGS]
       Capture Anyscale workspace artifact and storage-log diagnostics.
 
-  diagrams export
-      Export docs/Architecture-Diagram.drawio to docs/Architecture-Diagram.svg.
+  privatelink-proof [--hostname FQDN]
+      Resolve the cloud-specific Anyscale Private Link hostname from the Windows
+      browser host (via Azure VM Run Command) and require the answer to equal
+      the Terraform private endpoint IP. DNS proof only; the public console host
+      stays public.
 
-  self-test {timeouts|idempotency} [ARGS]
-      Run harness self-tests.
+  diagrams export
+      Export docs/architecture-overview.drawio to docs/architecture-overview.svg.
+
+  self-test {terraform|timeouts|idempotency|quality} [ARGS]
+      Run harness self-tests. 'quality' runs the canonical quality gate
+      (scripts/quality-gate.sh): env contract, no root Terraform defaults,
+      tracked-artifact hygiene, terraform fmt/validate/tflint, shell
+      lint/format, Python compile/ruff/pyright, markdown/yaml/Dockerfile lint,
+      and Trivy config/vuln/secret scanning.
 USAGE
 }
 
@@ -113,9 +142,18 @@ dependency_hint() {
     rsync) printf 'Install rsync: https://rsync.samba.org/ or `brew install rsync`.\n' ;;
     python3) printf 'Install Python 3: https://www.python.org/downloads/ or `brew install python`.\n' ;;
     uv) printf 'Install uv: https://docs.astral.sh/uv/getting-started/installation/ or `brew install uv`.\n' ;;
+    pre-commit) printf 'Install pre-commit: https://pre-commit.com/ or `brew install pre-commit`.\n' ;;
     curl) printf 'Install curl: https://curl.se/download.html or `brew install curl` if your system image does not include it.\n' ;;
     lsof) printf 'Install lsof or use a system image that includes it; macOS includes `/usr/sbin/lsof`.\n' ;;
-    shellcheck) printf 'Install ShellCheck: https://www.shellcheck.net/ or `brew install shellcheck`. Optional lint tool.\n' ;;
+    shellcheck) printf 'Install ShellCheck: https://www.shellcheck.net/ or `brew install shellcheck`. Used by the quality gate.\n' ;;
+    shfmt) printf 'Install shfmt: https://github.com/mvdan/sh or `brew install shfmt`. Used by the quality gate.\n' ;;
+    ruff) printf 'Install Ruff: https://docs.astral.sh/ruff/ or `pipx install ruff`. Used by the quality gate.\n' ;;
+    trivy) printf 'Install Trivy: https://trivy.dev/ or `brew install trivy`. Used by the quality gate security scan.\n' ;;
+    markdownlint-cli2) printf 'Install markdownlint-cli2: `npm install -g markdownlint-cli2`. Used by the quality gate.\n' ;;
+    yamllint) printf 'Install yamllint: `brew install yamllint` or `pipx install yamllint`. Used by the quality gate.\n' ;;
+    hadolint) printf 'Install hadolint: https://github.com/hadolint/hadolint or `brew install hadolint`. Used by the quality gate.\n' ;;
+    tflint) printf 'Install TFLint: https://github.com/terraform-linters/tflint or `brew install terraform-linters/tap/tflint`. Used by the quality gate.\n' ;;
+    pyright) printf 'Install pyright: `npm install -g pyright`. Used by the quality gate.\n' ;;
     anyscale) printf 'Install the Anyscale CLI in the repo venv: `uv venv .venv && UV_CACHE_DIR="$PWD/.cache/uv-cache" uv pip install --python .venv/bin/python anyscale`.\n' ;;
     drawio) printf 'Install diagrams.net/draw.io desktop app or CLI: https://www.diagrams.net/. Required only for diagram export.\n' ;;
     podman) printf 'Install Podman yourself before custom-image prepare. On macOS: `brew install podman`, then create/start a Podman machine manually.\n' ;;
@@ -165,7 +203,7 @@ check_commands() {
     ((missing_count += 1))
   done
 
-  if (( missing_count == 0 )); then
+  if ((missing_count == 0)); then
     return 0
   fi
 
@@ -198,10 +236,10 @@ check_dependencies_for() {
   source_env_if_present
 
   case "${context}" in
-    deploy|verify|teardown|idempotency)
+    deploy | verify | teardown | idempotency)
       check_commands "${context}" git az terraform kubectl kubelogin helm jq rsync python3 uv anyscale curl lsof
       ;;
-    proof|workload)
+    proof | workload)
       if [[ "${ANYSCALE_EXECUTION_MODE:-workstation}" == "jump-host" ]]; then
         check_commands "${context}" az kubectl kubelogin helm jq rsync python3 uv anyscale curl lsof
       else
@@ -216,10 +254,10 @@ check_dependencies_for() {
         custom_image_base_commands="az terraform jq"
       fi
       case "${1:-}" in
-        preflight|prepare|proof)
+        preflight | prepare | proof)
           check_commands "${context} ${1:-}" ${custom_image_base_commands} kubectl kubelogin helm rsync python3 uv anyscale curl lsof podman
           ;;
-        sign|verify)
+        sign | verify)
           check_commands "${context} ${1:-}" ${custom_image_base_commands} podman notation
           ;;
         sbom)
@@ -228,7 +266,7 @@ check_dependencies_for() {
         sbom-proof)
           check_commands "${context} ${1:-}" ${custom_image_base_commands} oras python3
           ;;
-        apply|prove-failure)
+        apply | prove-failure)
           check_commands "${context} ${1:-}" ${custom_image_base_commands} kubectl kubelogin helm rsync python3 uv anyscale curl lsof
           ;;
         *)
@@ -249,7 +287,7 @@ check_dependencies_for() {
     e2e)
       check_commands "${context}" git az terraform kubectl kubelogin helm jq rsync python3 uv anyscale curl lsof
       ;;
-    tunnel|browser|head|kubeconfig)
+    tunnel | browser | head | kubeconfig)
       check_commands "${context}" az kubectl kubelogin jq python3 curl lsof
       ;;
     diagrams)
@@ -257,6 +295,9 @@ check_dependencies_for() {
       ;;
     diagnose)
       check_commands "${context}" az terraform jq python3 anyscale
+      ;;
+    privatelink-proof)
+      check_commands "${context}" az terraform jq
       ;;
     self-test)
       check_commands "${context}" bash
@@ -380,23 +421,23 @@ status() {
 }
 
 results_overall_status() {
-  if [[ "${RESULTS_DEPLOY_STATUS}" == "FAIL" \
-    || "${RESULTS_VERIFY_STATUS}" == "FAIL" \
-    || "${RESULTS_CUSTOM_IMAGE_STATUS}" == "FAIL" \
-    || "${RESULTS_PROOF_STATUS}" == "FAIL" \
-    || "${RESULTS_TEARDOWN_STATUS}" == "FAIL" ]]; then
+  if [[ "${RESULTS_DEPLOY_STATUS}" == "FAIL" ||
+    "${RESULTS_VERIFY_STATUS}" == "FAIL" ||
+    "${RESULTS_CUSTOM_IMAGE_STATUS}" == "FAIL" ||
+    "${RESULTS_PROOF_STATUS}" == "FAIL" ||
+    "${RESULTS_TEARDOWN_STATUS}" == "FAIL" ]]; then
     printf 'FAIL\n'
-  elif [[ "${RESULTS_DEPLOY_STATUS}" == "RUNNING" || "${RESULTS_DEPLOY_STATUS}" == "PENDING" \
-    || "${RESULTS_VERIFY_STATUS}" == "RUNNING" || "${RESULTS_VERIFY_STATUS}" == "PENDING" \
-    || "${RESULTS_CUSTOM_IMAGE_STATUS}" == "RUNNING" || "${RESULTS_CUSTOM_IMAGE_STATUS}" == "PENDING" \
-    || "${RESULTS_PROOF_STATUS}" == "RUNNING" || "${RESULTS_PROOF_STATUS}" == "PENDING" \
-    || "${RESULTS_TEARDOWN_STATUS}" == "RUNNING" || "${RESULTS_TEARDOWN_STATUS}" == "PENDING" ]]; then
+  elif [[ "${RESULTS_DEPLOY_STATUS}" == "RUNNING" || "${RESULTS_DEPLOY_STATUS}" == "PENDING" ||
+    "${RESULTS_VERIFY_STATUS}" == "RUNNING" || "${RESULTS_VERIFY_STATUS}" == "PENDING" ||
+    "${RESULTS_CUSTOM_IMAGE_STATUS}" == "RUNNING" || "${RESULTS_CUSTOM_IMAGE_STATUS}" == "PENDING" ||
+    "${RESULTS_PROOF_STATUS}" == "RUNNING" || "${RESULTS_PROOF_STATUS}" == "PENDING" ||
+    "${RESULTS_TEARDOWN_STATUS}" == "RUNNING" || "${RESULTS_TEARDOWN_STATUS}" == "PENDING" ]]; then
     printf 'RUNNING\n'
-  elif [[ "${RESULTS_DEPLOY_STATUS}" == "SKIP" \
-    && "${RESULTS_VERIFY_STATUS}" == "SKIP" \
-    && "${RESULTS_CUSTOM_IMAGE_STATUS}" == "SKIP" \
-    && "${RESULTS_PROOF_STATUS}" == "SKIP" \
-    && "${RESULTS_TEARDOWN_STATUS}" == "SKIP" ]]; then
+  elif [[ "${RESULTS_DEPLOY_STATUS}" == "SKIP" &&
+    "${RESULTS_VERIFY_STATUS}" == "SKIP" &&
+    "${RESULTS_CUSTOM_IMAGE_STATUS}" == "SKIP" &&
+    "${RESULTS_PROOF_STATUS}" == "SKIP" &&
+    "${RESULTS_TEARDOWN_STATUS}" == "SKIP" ]]; then
     printf 'SKIP\n'
   else
     printf 'PASS\n'
@@ -414,7 +455,7 @@ results_evidence_lines() {
     [[ -d "${latest_run_dir}" ]] && roots+=("${latest_run_dir}")
   fi
 
-  if (( ${#roots[@]} == 0 )); then
+  if ((${#roots[@]} == 0)); then
     printf '_No evidence files have been written yet._\n'
     return 0
   fi
@@ -422,13 +463,13 @@ results_evidence_lines() {
   evidence_tmp="$(mktemp "${TMPDIR:-/tmp}/anyscale-results-evidence.XXXXXX")"
   while IFS= read -r evidence_file; do
     [[ -n "${evidence_file}" ]] || continue
-    grep -HnE 'CUSTOM_IMAGE_[A-Z_]+|IMAGE_INTEGRITY_[A-Z_]+|CPU_RAY_PROOF_OK|GPU_RAY_PROOF_OK|CPU_BUILD_JOB_PROOF_OK|GPU_TRAIN_JOB_PROOF_OK|GPU_SERVE_SERVICE_PROOF_OK|Job .* printed .*PROOF_OK|Service .* printed .*PROOF_OK|"state"[[:space:]]*:[[:space:]]*"SUCCEEDED"|service_state=RUNNING|primary_version_state=RUNNING|Workspace .* RUNNING' "${evidence_file}" 2>/dev/null >> "${evidence_tmp}" || true
+    grep -HnE 'CUSTOM_IMAGE_[A-Z_]+|IMAGE_INTEGRITY_[A-Z_]+|CPU_RAY_PROOF_OK|GPU_RAY_PROOF_OK|CPU_BUILD_JOB_PROOF_OK|GPU_TRAIN_JOB_PROOF_OK|GPU_SERVE_SERVICE_PROOF_OK|Job .* printed .*PROOF_OK|Service .* printed .*PROOF_OK|"state"[[:space:]]*:[[:space:]]*"SUCCEEDED"|service_state=RUNNING|primary_version_state=RUNNING|Workspace .* RUNNING' "${evidence_file}" 2>/dev/null >>"${evidence_tmp}" || true
   done < <(find "${roots[@]}" -type f \( -name '*.log' -o -name '*.json' -o -name 'summary.md' -o -name '*.txt' \) -print 2>/dev/null)
 
   if [[ -s "${evidence_tmp}" ]]; then
-    sed "s#${ROOT_DIR}/##" "${evidence_tmp}" \
-      | awk 'NF && !seen[$0]++ {print "- `" $0 "`"}' \
-      | sed -n '1,80p'
+    sed "s#${ROOT_DIR}/##" "${evidence_tmp}" |
+      awk 'NF && !seen[$0]++ {print "- `" $0 "`"}' |
+      sed -n '1,80p'
   else
     printf '_No evidence files have been written yet._\n'
   fi
@@ -457,7 +498,7 @@ write_results_report() {
   generated_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
   overall_status="$(results_overall_status)"
 
-  cat > "${RESULTS_FILE}" <<EOF
+  cat >"${RESULTS_FILE}" <<EOF
 # Run Results
 
 Generated: ${generated_at}
@@ -511,14 +552,14 @@ run_e2e_step() {
   printf '[e2e] %s Log: %s\n' "${running_fact}" "${step_log#${ROOT_DIR}/}"
 
   set +e
-  "$@" > "${step_log}" 2>&1
+  "$@" >"${step_log}" 2>&1
   exit_code=$?
   set -e
 
   latest_summary="$(results_latest_summary_fact)"
   RESULTS_LOG_FACT="Latest summary: ${latest_summary}; e2e logs: ${RESULTS_RUN_DIR#${ROOT_DIR}/}"
 
-  if (( exit_code == 0 )); then
+  if ((exit_code == 0)); then
     printf -v "${status_var}" '%s' 'PASS'
     if [[ "${status_var}" == "RESULTS_TEARDOWN_STATUS" ]]; then
       printf -v "${fact_var}" '%s' "${pass_fact}; $(teardown_fact); ${latest_summary}; log=${step_log#${ROOT_DIR}/}"
@@ -541,8 +582,8 @@ doctor() {
   local missing=0
   local command_name
   local doctor_log=""
-  local required_commands=(git az terraform kubectl kubelogin helm jq rsync python3 uv curl lsof)
-  local optional_commands=(shellcheck drawio podman)
+  local required_commands=(git az terraform kubectl kubelogin helm jq rsync python3 uv pre-commit curl lsof shellcheck shfmt ruff trivy markdownlint-cli2 yamllint hadolint tflint pyright)
+  local optional_commands=(drawio podman)
 
   for command_name in "${required_commands[@]}"; do
     if command -v "${command_name}" >/dev/null 2>&1; then
@@ -738,11 +779,11 @@ e2e() {
         teardown_mode="force"
         shift
         ;;
-      --yes|-y)
+      --yes | -y)
         yes=true
         shift
         ;;
-      --help|-h)
+      --help | -h)
         cat <<'USAGE'
 Usage:
   ./scripts/anyscale-aks.sh e2e [--mode workstation|jump-host] [--custom-image]
@@ -912,7 +953,7 @@ proof() {
   local target="${1:-}"
 
   case "${target}" in
-    ""|--help|-h)
+    "" | --help | -h)
       cat <<'USAGE'
 Usage:
   ./scripts/anyscale-aks.sh proof {cpu|gpu|pipeline|all} [--command-timeout-seconds N]
@@ -925,12 +966,12 @@ Targets:
 USAGE
       return 0
       ;;
-    cpu|gpu|pipeline|all)
+    cpu | gpu | pipeline | all)
       shift
       run_setup workload proof "${target}" "$@"
       ;;
-    build|train|serve)
-      die "proof ${target} is planned but not yet implemented as an isolated target; use proof pipeline or proof all."
+    build | train | serve)
+      die "proof ${target} is not available as an isolated target; use proof pipeline or proof all."
       ;;
     *)
       die "Usage: ./scripts/anyscale-aks.sh proof {cpu|gpu|pipeline|all}"
@@ -941,11 +982,11 @@ USAGE
 custom_image() {
   local action="${1:-}"
   case "${action}" in
-    preflight|prepare|sign|verify|sbom|sbom-proof|apply|proof|prove-failure)
+    preflight | prepare | sign | verify | sbom | sbom-proof | apply | proof | prove-failure)
       shift
       run_setup custom-image "${action}" "$@"
       ;;
-    --help|-h|"")
+    --help | -h | "")
       cat <<'USAGE'
 Usage:
   ./scripts/anyscale-aks.sh custom-image preflight
@@ -978,11 +1019,11 @@ USAGE
 image_integrity() {
   local action="${1:-}"
   case "${action}" in
-    preflight|apply-ratify)
+    preflight | apply-ratify)
       shift
       run_setup image-integrity "${action}" "$@"
       ;;
-    --help|-h|"")
+    --help | -h | "")
       cat <<'USAGE'
 Usage:
   ./scripts/anyscale-aks.sh image-integrity preflight
@@ -1004,10 +1045,10 @@ USAGE
 tunnel() {
   local action="${1:-}"
   case "${action}" in
-    start|status|stop)
+    start | status | stop)
       run_setup bastion-tunnel "$@"
       ;;
-    --help|-h|"")
+    --help | -h | "")
       cat <<'USAGE'
 Usage:
   ./scripts/anyscale-aks.sh tunnel start [--port PORT]
@@ -1039,7 +1080,7 @@ browser() {
       shift
       run_setup workspace-browser-open stop "$@"
       ;;
-    --help|-h|"")
+    --help | -h | "")
       cat <<'USAGE'
 Usage:
   ./scripts/anyscale-aks.sh browser open --session-id ses_xxx [ARGS]
@@ -1068,7 +1109,7 @@ head() {
       shift
       run_setup workspace-head-open stop "$@"
       ;;
-    --help|-h|"")
+    --help | -h | "")
       cat <<'USAGE'
 Usage:
   ./scripts/anyscale-aks.sh head open --session-id ses_xxx [ARGS]
@@ -1097,7 +1138,7 @@ kubeconfig() {
       shift
       run_setup kubeconfig-bastion --export "$@"
       ;;
-    --help|-h|"")
+    --help | -h | "")
       cat <<'USAGE'
 Usage:
   ./scripts/anyscale-aks.sh kubeconfig write [--admin]
@@ -1115,8 +1156,8 @@ diagrams() {
   local action="${1:-}"
   case "${action}" in
     export)
-      local source_diagram="${ROOT_DIR}/docs/Architecture-Diagram.drawio"
-      local output_diagram="${ROOT_DIR}/docs/Architecture-Diagram.svg"
+      local source_diagram="${ROOT_DIR}/docs/architecture-overview.drawio"
+      local output_diagram="${ROOT_DIR}/docs/architecture-overview.svg"
       local drawio_bin
       [[ -f "${source_diagram}" ]] || die "Missing diagram source: ${source_diagram}"
       drawio_bin="$(resolve_drawio_cli)" || die "No draw.io/diagrams.net CLI was found. Install the diagrams.net desktop/CLI, then rerun: ./scripts/anyscale-aks.sh diagrams export"
@@ -1127,7 +1168,7 @@ diagrams() {
         printf 'Exported %s\n' "${output_diagram#${ROOT_DIR}/}"
       fi
       ;;
-    --help|-h|"")
+    --help | -h | "")
       printf 'Usage: ./scripts/anyscale-aks.sh diagrams export\n'
       ;;
     *)
@@ -1139,6 +1180,10 @@ diagrams() {
 self_test() {
   local target="${1:-}"
   case "${target}" in
+    terraform)
+      shift
+      run_setup test "$@"
+      ;;
     timeouts)
       shift
       bash "${TIMEOUT_SELF_TEST_SCRIPT}" "$@"
@@ -1147,15 +1192,21 @@ self_test() {
       shift
       run_setup idempotency "$@"
       ;;
-    --help|-h|"")
+    quality)
+      shift
+      bash "${QUALITY_GATE_SCRIPT}" "$@"
+      ;;
+    --help | -h | "")
       cat <<'USAGE'
 Usage:
+  ./scripts/anyscale-aks.sh self-test terraform
   ./scripts/anyscale-aks.sh self-test timeouts
   ./scripts/anyscale-aks.sh self-test idempotency [ARGS]
+  ./scripts/anyscale-aks.sh self-test quality
 USAGE
       ;;
     *)
-      die "Usage: ./scripts/anyscale-aks.sh self-test {timeouts|idempotency}"
+      die "Usage: ./scripts/anyscale-aks.sh self-test {terraform|timeouts|idempotency|quality}"
       ;;
   esac
 }
@@ -1172,7 +1223,7 @@ diagnose() {
       fi
       "${python_bin}" "${DIAGNOSE_WORKSPACE_ARTIFACTS_SCRIPT}" "$@"
       ;;
-    --help|-h|"")
+    --help | -h | "")
       cat <<'USAGE'
 Usage:
   ./scripts/anyscale-aks.sh diagnose workspace-artifacts [ARGS]
@@ -1188,9 +1239,8 @@ USAGE
 }
 
 maybe_emit_jump_host_hint() {
-  # When running compatibility aliases in jump-host execution mode, point the
-  # operator at the equivalent module-3 learning command. Skip the hint when the
-  # caller already used a module-N wrapper (it re-enters through this dispatcher).
+  # Point direct jump-host commands to the equivalent module-3 learning command.
+  # Module wrappers re-enter through this dispatcher and do not need the hint.
   if [[ "${ANYSCALE_VIA_MODULE:-0}" == "1" ]]; then
     return 0
   fi
@@ -1222,7 +1272,7 @@ module_command() {
     5)
       bash "${MODULE_5_SCRIPT}" "$@"
       ;;
-    ""|--help|-h)
+    "" | --help | -h)
       cat <<'USAGE'
 Usage: ./scripts/anyscale-aks.sh module {1|2|3|4|5} SUBCOMMAND [ARGS]
 
@@ -1245,14 +1295,14 @@ main() {
   local command_name="${1:-}"
 
   case "${command_name}" in
-    ""|--help|-h)
+    "" | --help | -h)
       usage
       ;;
     module)
       shift
       module_command "$@"
       ;;
-    deploy|verify|teardown|idempotency)
+    deploy | verify | teardown | idempotency)
       shift
       maybe_emit_jump_host_hint "${command_name}"
       is_help_request "$@" || check_dependencies_for "${command_name}"
@@ -1317,6 +1367,11 @@ main() {
       shift
       is_help_request "$@" || check_dependencies_for diagnose
       diagnose "$@"
+      ;;
+    privatelink-proof)
+      shift
+      is_help_request "$@" || check_dependencies_for privatelink-proof
+      "${PRIVATELINK_DNS_PROOF_SCRIPT}" "$@"
       ;;
     diagrams)
       shift

@@ -1,243 +1,196 @@
 # Module 4: Custom Images for a Private Data Plane
 
-> **Difficulty:** Advanced | **Roles:** Platform Engineer, DevOps Engineer | **Time:** 30–45 min
+## Purpose
 
-By the end of this module, you're able to:
+Build an AMD64 custom Ray image on the Linux jump host, push it to the private
+ACR, apply it to the durable Anyscale workspaces, and prove that the packaged
+dependency is available without runtime package downloads.
 
-- Explain why runtime `pip install` fails on a standard image in a locked-down private data plane.
-- Build a custom Ray image with Podman and push it to a private ACR from inside the VNet.
-- Sign the custom image with Notation and a Key Vault-backed signing key.
-- Apply the custom image to the durable Anyscale workspaces.
-- Prove that a packaged dependency loads correctly from the private registry.
-
-Once this module completes, your private ACR holds a custom Ray image
-(`cr<project><env><region>.azurecr.io/anyscale/proof-custom:onnxruntime-1.22.0-ray-2.55.1-py312-cu129`)
-and your durable workspaces run with that image — confirmed by
-`CUSTOM_IMAGE_DEPENDENCY_PROOF_OK`.
-
-## What You Will Build
-
-- A custom Ray image built with Podman on the Linux jump host and pushed to the
-  private ACR (`cr<project><env><region>.azurecr.io`).
-- A Notation signature attached to the image in ACR as an OCI referrer.
-- A Syft SPDX SBOM attached to the image in ACR as a signed OCI referrer.
-- An updated `aks-cpu-workspace` and `aks-gpu-workspace` using the custom image.
-- A passing dependency proof: `CUSTOM_IMAGE_DEPENDENCY_PROOF_OK`.
-- A passing SBOM proof: `CUSTOM_IMAGE_SBOM_PROOF_OK`.
-
-## Why This Matters
-
-In a locked-down private data plane, Azure Firewall blocks outbound PyPI traffic.
-A worker on a standard Ray image that tries to `pip install onnxruntime` at
-runtime fails. The fix is to bake the dependency into an image and store it in
-your private ACR, which the AKS kubelet identity pulls over the Private Link
-endpoint. Module 3 deploys that ACR; Module 4 uses it.
-
-This is also a hardening choice. The cluster already denies broad runtime
-freedom with pod-security and namespace isolation controls, so the image path is
-where we make the workload dependency model explicit: package the dependency once
-in a signed, private image and keep the runtime environment predictable.
-
-Because the registry, storage account, and Key Vault are private-only, run the
-custom-image build, SBOM, signing, apply, and proof steps from the Linux jump
-host. A workstation can orchestrate Azure control-plane resources, but it should
-not be expected to resolve private ACR data endpoints or upload Anyscale working
-directories to private storage.
+The standard-image check is an intentional expected failure. Firewall egress in
+the private data plane blocks the runtime installation of
+`onnxruntime==1.22.0`.
 
 ## Prerequisites
 
-- Module 3 applied and its proofs passing.
-- The Linux jump host has Podman and `AcrPush` on the private ACR
-  (`module 2 doctor` confirms both).
-- Anyscale CLI auth is cached on the jump host
-  (`ANYSCALE_HOST=https://console.azure.anyscale.com anyscale login`).
+- Module 3 is deployed and its proofs pass.
+- Run these procedures from `/opt/anyscale-aks-sample` on the Linux jump host,
+  where private ACR and Key Vault DNS resolve.
+- Module 2 bootstrap installed Podman, Notation, the `notation-azure-kv` plugin,
+  Syft, and ORAS. Rerun `module 2 bootstrap` on the Linux jump host if a tool is
+  missing, then use `module 4 preflight` to confirm this module's toolchain.
+- The Linux jump-host managed identity can push to ACR and create and use the
+  signing certificate. The template grants the required lab roles when
+  `TF_VAR_assign_jump_host_subscription_contributor=true`. If you disable that
+  broad grant, an administrator must provide equivalent scoped ACR, Key Vault,
+  AKS, and role-assignment permissions before continuing.
+- Anyscale CLI authentication is cached. If required, run:
 
-## Review what you're about to build
+  ```bash
+  ANYSCALE_HOST=https://console.azure.anyscale.com .venv/bin/anyscale login --no-browser
+  ```
 
-The custom-image flow is seven steps:
+## Configuration
 
-1. `prove-failure` — submit a job on the standard image and confirm the runtime
-   install is blocked (the intentional, expected failure).
-2. `preflight` — confirm Podman, private ACR DNS, and `AcrPush` are in place.
-3. `prepare` — build and push the image with Podman.
-4. `sign` + `verify` — attach a Notation signature and verify it from the jump host.
-5. `sbom` + `sbom-proof` — generate a Syft SPDX SBOM, attach it as a signed OCI
-   referrer, and prove the packaged dependency is recorded in it.
-6. `apply` — point the
-   durable workspaces at the new image URI.
-7. `proof` — load the packaged dependency inside the workspace and confirm it
-   imports.
+The harness builds the image URI as:
 
-The representative dependency is `onnxruntime==1.22.0`, defined in
-`workloads/custom-image/requirements-custom-image.txt` and built from
-`workloads/custom-image/Dockerfile`.
+```text
+<ACR login server>/<repository>:<tag>
+```
 
-## Exercise 1: Prove standard-image failure
+`module 4 preflight` prints the resolved URI before any build. Compare it with
+the workstation Terraform output described below and stop if they differ.
+
+Set custom-image values in `.env` using the names documented in
+`.env-template`:
+
+| Setting | Current default | Function |
+| --- | --- | --- |
+| `ANYSCALE_CUSTOM_IMAGE_ENABLED` | `false` | Set to `true` before starting this module; signing and workspace application require it |
+| `ANYSCALE_CUSTOM_IMAGE_REPOSITORY` | `anyscale/proof-custom` | ACR repository |
+| `ANYSCALE_CUSTOM_IMAGE_TAG` | `onnxruntime-1.22.0-ray-2.55.1-py312-cu129` | Image tag |
+| `ANYSCALE_CUSTOM_IMAGE_RAY_VERSION` | `2.55.1` | Ray version passed with the image URI |
+| `ANYSCALE_CUSTOM_IMAGE_REQUIREMENT` | `onnxruntime==1.22.0` | Dependency checked by the proofs |
+| `ANYSCALE_CUSTOM_IMAGE_BUILD_MODE` | `podman` | Build implementation |
+| `ANYSCALE_CUSTOM_IMAGE_BASE_IMAGE` | `docker.io/anyscale/ray:2.55.1-slim-py312-cu129` | Base image for the AMD64 build |
+| `ANYSCALE_CUSTOM_IMAGE_URI` | empty | Optional complete image URI override |
+
+Before syncing the jump host, set this in the workstation `.env`:
+
+```bash
+ANYSCALE_CUSTOM_IMAGE_ENABLED="true"
+```
+
+The harness derives the ACR name from the lab naming inputs when
+`ANYSCALE_CUSTOM_IMAGE_URI` is empty. On the workstation, confirm the actual
+login server after Module 3:
+
+```bash
+terraform -chdir=infra/terraform output -raw acr_login_server
+```
+
+If you set `TF_VAR_global_name_suffix` or changed the registry naming contract,
+set `ANYSCALE_CUSTOM_IMAGE_URI` to the complete URI using that login server.
+
+> **Warning:** Any change to the workstation `.env` requires `module 2 sync`
+> before you run jump-host commands. Without the resync, the Linux jump host
+> keeps using the previous values.
+
+## Procedure
+
+Run every command in this procedure from the same Linux jump-host shell in
+`/opt/anyscale-aks-sample`.
+
+> **Stop:** Do not continue past the first missing proof marker. Every later
+> step depends on the image digest produced by the steps before it.
+
+### 1. Confirm the standard-image failure
 
 ```bash
 ./scripts/anyscale-aks.sh module 4 prove-failure
 ```
 
-The harness submits a job on the standard image and confirms the install is
-blocked. The expected-failure marker shows the private data plane is locked down
-correctly:
+The command must report the expected failure rather than a successful install:
 
 ```output
 CUSTOM_IMAGE_STANDARD_IMAGE_EXPECTED_FAILURE_OK requirement=onnxruntime==1.22.0
 ```
 
-> This failure is **intentional**. A passing standard-image install would mean the
-> data plane is not properly locked down.
+> **Note:** This failure is the intended result of the lesson. It proves that
+> firewall egress blocks runtime package downloads inside the private data
+> plane. A successful install here means egress is more permissive than the
+> reference posture expects.
 
-## Exercise 2: Build and apply the custom image
-
-First verify that Podman, private ACR DNS, and `AcrPush` are all in place:
+### 2. Build and push the image
 
 ```bash
 ./scripts/anyscale-aks.sh module 4 preflight
-```
-
-```output
-CUSTOM_IMAGE_PREFLIGHT_OK image_uri=cr<project><env><region>.azurecr.io/anyscale/proof-custom:onnxruntime-1.22.0-ray-2.55.1-py312-cu129
-```
-
-Then build and push the image, and update the durable workspaces:
-
-```bash
 ./scripts/anyscale-aks.sh module 4 prepare
-./scripts/anyscale-aks.sh module 4 apply
 ```
 
-`prepare` runs Podman on the jump host to build `workloads/custom-image/Dockerfile`
-with `onnxruntime==1.22.0` and push the result to the private ACR:
+`preflight` checks Podman, private ACR DNS, Azure identity, and ACR push access.
+`prepare` builds with `--platform linux/amd64`, verifies the resulting image is
+`linux/amd64`, pushes it with a short-lived ACR token supplied over stdin, and
+confirms that the tag is visible in ACR.
 
-```output
-CUSTOM_IMAGE_BUILD_OK image_uri=cr<project><env><region>.azurecr.io/anyscale/proof-custom:onnxruntime-1.22.0-ray-2.55.1-py312-cu129
-```
-
-`apply` updates `aks-cpu-workspace` and `aks-gpu-workspace` to use the custom
-image URI.
-
-> `preflight` is managed-identity safe: it detects user, service-principal, and
-> managed-identity contexts and uses the correct credential path for each.
-
-## Exercise 3: Sign and verify the image
-
-Signing the image lets [Module 5](module-5-image-integrity.md) verify its
-provenance with AKS Image Integrity. Signing runs on the jump host, which reaches
-the private Key Vault and ACR endpoints. It uses the Notation CLI, the
-`notation-azure-kv` plugin, and a signing certificate stored in the
-Terraform-managed Key Vault.
+### 3. Sign and verify the image
 
 ```bash
 ./scripts/anyscale-aks.sh module 4 sign
 ./scripts/anyscale-aks.sh module 4 verify
 ```
 
-- `sign` resolves the pushed image digest, creates the self-signed Notation
-  certificate in the private Key Vault if it is missing, signs with the
-  jump-host managed identity, and attaches a COSE signature to the image as an
-  OCI referrer in ACR. It prints `CUSTOM_IMAGE_SIGN_OK`.
-- `verify` downloads the public certificate, imports a local Notation trust
-  policy scoped to the ACR repository and certificate subject, and confirms the
-  signature. It prints `CUSTOM_IMAGE_VERIFY_OK`.
+`sign` resolves the image digest, creates the configured signing certificate in
+the private Key Vault when absent, and attaches a COSE Notation signature as an
+OCI referrer. `verify` downloads the public certificate, imports a repository-
+scoped trust policy, and verifies the digest.
 
-The Key Vault (private endpoint only) and RBAC the jump host needs (`Key Vault
-Certificates Officer`, `Key Vault Crypto User`, and `Key Vault Secrets User`) are
-created by Terraform. The certificate itself is bootstrapped from the jump host
-because the workstation cannot reach the private-only Key Vault data plane.
-
-## Exercise 4: Attach and prove the SBOM
-
-A Software Bill of Materials (SBOM) records every package baked into the image so
-auditors can confirm what shipped without pulling the image. This step runs on
-the jump host, which reaches the private ACR endpoint. It uses Syft to generate
-the SBOM and ORAS to attach it as an OCI referrer.
+### 4. Generate and prove the SBOM
 
 ```bash
 ./scripts/anyscale-aks.sh module 4 sbom
 ./scripts/anyscale-aks.sh module 4 sbom-proof
 ```
 
-- `sbom` resolves the pushed image digest, generates a Syft SPDX JSON SBOM for
-  that digest, attaches it to the image in ACR as an OCI referrer with artifact
-  type `application/spdx+json`, and — when the `notation-azure-kv` plugin is
-  available — signs the SBOM referrer with the same Key Vault certificate used in
-  Exercise 3. It prints `CUSTOM_IMAGE_SBOM_OK`.
-- `sbom-proof` discovers the SBOM referrer, pulls it from ACR with ORAS, and
-  confirms the SPDX document records `onnxruntime==1.22.0`. It prints
-  `CUSTOM_IMAGE_SBOM_PROOF_OK`.
+`sbom` uses Syft to generate SPDX JSON and ORAS to attach it as an
+`application/spdx+json` OCI referrer. When Notation and the Azure Key Vault
+plugin are available, it also signs the SBOM referrer. `sbom-proof` pulls the
+referrer and checks for `onnxruntime==1.22.0`.
 
-ORAS authenticates to the private ACR with a short-lived `az acr login` token
-passed over stdin, so no registry credential is ever printed. Syft and ORAS are
-installed on the jump host by `scripts/bootstrap-jump-host.sh`.
-
-## Exercise 5: Prove the custom image
+### 5. Apply and prove the image
 
 ```bash
+./scripts/anyscale-aks.sh module 4 apply
 ./scripts/anyscale-aks.sh module 4 proof
 ```
 
-The proof job loads `onnxruntime` inside the workspace and prints:
+`apply` updates `aks-cpu-workspace` and `aks-gpu-workspace` to use the image URI
+and `ANYSCALE_CUSTOM_IMAGE_RAY_VERSION`. `proof` imports the packaged dependency
+inside the Anyscale platform workload.
 
-```output
-{"available_providers": ["AzureExecutionProvider", "CPUExecutionProvider"], "marker": "CUSTOM_IMAGE_DEPENDENCY_PROOF_OK", "onnxruntime_version": "1.22.0"}
-CUSTOM_IMAGE_DEPENDENCY_PROOF_OK
-```
+## Validation
 
-## Validate Your Work
+Confirm these proof markers in the command output and captured evidence:
 
-- `prove-failure` prints `CUSTOM_IMAGE_STANDARD_IMAGE_EXPECTED_FAILURE_OK`.
-- `preflight` prints `CUSTOM_IMAGE_PREFLIGHT_OK`.
-- `prepare` prints `CUSTOM_IMAGE_BUILD_OK`.
-- `sbom` prints `CUSTOM_IMAGE_SBOM_OK` and `sbom-proof` prints `CUSTOM_IMAGE_SBOM_PROOF_OK`.
-- `proof` prints `CUSTOM_IMAGE_DEPENDENCY_PROOF_OK`.
+- [`CUSTOM_IMAGE_STANDARD_IMAGE_EXPECTED_FAILURE_OK`](../proof-markers.md)
+- [`CUSTOM_IMAGE_PREFLIGHT_OK`](../proof-markers.md)
+- [`CUSTOM_IMAGE_BUILD_OK`](../proof-markers.md)
+- [`CUSTOM_IMAGE_SIGN_OK`](../proof-markers.md)
+- [`CUSTOM_IMAGE_VERIFY_OK`](../proof-markers.md)
+- [`CUSTOM_IMAGE_SBOM_OK`](../proof-markers.md)
+- [`CUSTOM_IMAGE_SBOM_PROOF_OK`](../proof-markers.md)
+- [`CUSTOM_IMAGE_DEPENDENCY_PROOF_OK`](../proof-markers.md)
 
-## Unattended Equivalence
+The dependency proof includes the installed version and available ONNX Runtime
+providers. A successful standard-image install is not valid evidence; it means
+firewall egress may permit a runtime package source.
 
-All of these exercises map to the `--custom-image` stage of the e2e command run from
-Module 3:
+## Adapt the Lab
 
-```bash
-./scripts/anyscale-aks.sh e2e --mode jump-host --custom-image --teardown
-```
-
-The `--custom-image` flag runs `prove-failure`, `preflight`, `prepare`, `apply`,
-and `proof` in order. When Syft and ORAS are installed, the custom-image stage
-also runs `sbom` and `sbom-proof` after `prepare`. SBOM attachment does not
-require Key Vault; SBOM signing is skipped unless the Notation Azure Key Vault
-plugin is available. Image signing and signature admission checks remain separate
-Module 4 and Module 5 exercises. The same custom-image steps are also available
-under the backward-compat alias `module 3 custom-image <action>`.
+Image repository, tag, Ray version, base image, and dependency are student-facing
+`.env` or build inputs. Keep the Ray version and base-image tag aligned, then
+rebuild, sign, regenerate the SBOM, apply, and rerun all proofs. Source ownership
+and checks are in the
+[Configuration Reference](../configuration-reference.md#modification-points).
 
 ## Troubleshooting
 
-- **Custom-image push denied** — `preflight` checks `AcrPush`; grant it on the
-  registry to the jump-host managed identity.
-- **`preflight` fails DNS** — run `prepare` from the Linux jump host; the private
-  ACR data endpoint must resolve via the private DNS zone inside the VNet.
-- **ACR name not found on jump host** — the harness derives the ACR name directly
-  from `.env` variables (`cr${TF_VAR_project}${TF_VAR_environment}${TF_VAR_region_short}`).
-  No local Terraform state is required on the jump host for `preflight`, `prepare`,
-  or `proof`.
-- **Standard-image proof passes unexpectedly** — check firewall egress rules; a
-  permissive rule may be allowing PyPI.
+- **Private ACR DNS check fails:** run the command on the Linux jump host and
+  verify both the registry and regional data endpoint resolve to their private
+  endpoint addresses.
+- **ACR push is denied:** grant `AcrPush` or an equivalent repository push role
+  to the active Azure identity and allow role propagation to complete.
+- **Podman is installed but not ready:** start the Podman machine, then rerun
+  `preflight`.
+- **Standard-image check succeeds:** review firewall egress for package registry
+  access. The standard-image path is expected to fail.
+- **Signing cannot reach Key Vault:** run from the Linux jump host and confirm
+  the identity has the configured certificate and crypto roles.
+- **The SBOM is attached but unsigned:** install Notation and the
+  `notation-azure-kv` plugin, then rerun `sbom`.
+- **The proof uses an earlier image:** confirm the configured tag and digest,
+  rerun `apply`, and restart the durable workspace if required.
 
-## Summary
+## Next Step
 
-You proved the private-data-plane constraint with a deliberate expected failure,
-then resolved it by building a custom Ray image with Podman, pushing it to the
-private ACR, and confirming the dependency loads from inside the workspace.
-
-## Clean up resources
-
-The Module 4 artifacts (the custom image in ACR and the workspace update) are
-removed as part of `module 3 teardown`. See [Clean Up](cleanup.md).
-
-## Next unit
-
-- [Module 5: AKS Image Integrity](module-5-image-integrity.md) — verify the image
-  signature you just created before workloads deploy.
-- Optional: [Browser access](browser-access.md) — reach private workspace and
-  service URLs from a browser inside the VNet.
-- [Clean up](cleanup.md) — tear down the lab when you are finished.
+Continue to [Module 5: AKS Image Integrity](module-5-image-integrity.md), or use
+[Clean Up](cleanup.md) to remove the environment.

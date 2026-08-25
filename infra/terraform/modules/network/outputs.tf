@@ -19,3 +19,11 @@ output "subnet_ids" {
     browser_jump_host = one(azurerm_subnet.browser_jump_host[*].id)
   }
 }
+
+output "private_mode" {
+  description = "Subnet egress-privacy invariants consumed by root terraform tests."
+  value = {
+    jump_host_default_outbound_access_enabled         = one(azurerm_subnet.jump_host[*].default_outbound_access_enabled)
+    browser_jump_host_default_outbound_access_enabled = one(azurerm_subnet.browser_jump_host[*].default_outbound_access_enabled)
+  }
+}

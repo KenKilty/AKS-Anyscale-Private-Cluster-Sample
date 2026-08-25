@@ -1,15 +1,21 @@
 #!/usr/bin/env bash
 # Module 4 — Custom images for a private data plane.
 #
-# Thin wrapper that maps the learning-module commands onto the existing
-# custom-image implementation in setup.sh / anyscale-aks.sh. No build or push
-# logic lives here; each subcommand delegates to the same underlying path that
-# `module 3 custom-image` and `e2e --custom-image` use.
+# Purpose: thin wrapper mapping the learning-module commands onto the shared
+#          custom-image implementation in setup.sh / anyscale-aks.sh. No build,
+#          push, or signing logic lives here; each subcommand delegates to the
+#          same path that `module 3 custom-image` and `e2e --custom-image` use.
+# Usage:   ./scripts/anyscale-aks.sh module 4 {prove-failure|preflight|prepare|
+#          sign|verify|sbom|sbom-proof|apply|proof}
+#          Runs on the Linux jump host, where private ACR and Key Vault resolve.
+# Inputs:  the synced .env including the ANYSCALE_CUSTOM_IMAGE_* values; Podman,
+#          Notation, Syft, and ORAS from the Module 2 bootstrap.
+# Outputs: CUSTOM_IMAGE_* proof markers on stdout; the built image, signature,
+#          and SBOM in the private ACR; non-zero exit when a step fails.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-ROOT_DIR="$(cd "${SCRIPTS_DIR}/.." && pwd)"
 DISPATCHER="${SCRIPTS_DIR}/anyscale-aks.sh"
 
 LOG_INFO_PREFIX="module4"
@@ -43,10 +49,10 @@ main() {
   local action="${1:-}"
   shift || true
   case "${action}" in
-    prove-failure|preflight|prepare|sign|verify|sbom|sbom-proof|apply|proof)
+    prove-failure | preflight | prepare | sign | verify | sbom | sbom-proof | apply | proof)
       dispatch custom-image "${action}" "$@"
       ;;
-    ""|--help|-h) usage ;;
+    "" | --help | -h) usage ;;
     *) die "Unknown 'module 4' subcommand: ${action}. Run 'module 4 --help'." ;;
   esac
 }

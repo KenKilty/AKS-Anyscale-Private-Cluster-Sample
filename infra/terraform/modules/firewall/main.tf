@@ -209,7 +209,7 @@ resource "azurerm_firewall_policy_rule_collection_group" "aks_egress" {
       rule {
         name              = "jump-host-anyscale"
         source_addresses  = var.jump_host_cidrs
-        destination_fqdns = var.anyscale_fqdns
+        destination_fqdns = length(var.anyscale_jump_host_fqdns) > 0 ? var.anyscale_jump_host_fqdns : var.anyscale_fqdns
         protocols {
           type = "Https"
           port = 443
@@ -223,6 +223,29 @@ resource "azurerm_firewall_policy_rule_collection_group" "aks_egress" {
         protocols {
           type = "Https"
           port = 443
+        }
+      }
+    }
+  }
+
+  dynamic "application_rule_collection" {
+    for_each = length(var.browser_jump_host_cidrs) > 0 && length(var.azure_portal_fqdns) > 0 ? [1] : []
+    content {
+      name     = "browser-portal-egress"
+      priority = 550
+      action   = "Allow"
+
+      rule {
+        name              = "azure-portal"
+        source_addresses  = var.browser_jump_host_cidrs
+        destination_fqdns = var.azure_portal_fqdns
+        protocols {
+          type = "Https"
+          port = 443
+        }
+        protocols {
+          type = "Http"
+          port = 80
         }
       }
     }

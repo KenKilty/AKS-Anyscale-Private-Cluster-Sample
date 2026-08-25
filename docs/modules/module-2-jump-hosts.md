@@ -1,209 +1,195 @@
 # Module 2: Prepare the Jump Hosts
 
-> **Difficulty:** Advanced | **Roles:** Platform Engineer, DevOps Engineer | **Time:** 20–30 min
+## Purpose
 
-By the end of this module, you're able to:
+Prepare the Linux jump host to run private data plane operations from inside the
+VNet. The host uses its managed identity for Azure access and contains Azure
+CLI, `kubectl`, `kubelogin`, Helm, `jq`, Podman, and the Anyscale CLI in the
+repository-local `.venv`.
 
-- Turn the Linux jump host into a repeatable operator workstation inside the VNet.
-- Install the required tooling and sync the repository and `.env` to the host.
-- Confirm managed-identity authentication works end to end, with no stored secrets.
-- Optionally verify the Windows browser jump host is ready for Entra ID login.
-
-Once this module completes, the Linux jump host has Azure CLI, `kubectl`,
-`kubelogin`, Helm, `jq`, Podman, and the Anyscale CLI in a repo-local `.venv`. It
-authenticates to Azure with its managed identity and selects jump-host execution mode
-in `.env`. Terraform is not installed or run on the jump host — it stays on your
-workstation/client.
-
-## What You Will Build
-
-- A fully provisioned Linux jump host with Azure CLI, `kubectl`,
-  `kubelogin`, Helm, `jq`, `rsync`, `curl`, `lsof`, Git, Python, `uv`, and
-  Podman.
-- The repository checked out at the canonical path `/opt/anyscale-aks-sample`.
-- A repo-local `.venv` containing the Anyscale CLI.
-- A `.env` on the VM that selects **jump-host** execution mode.
-
-## Why This Matters
-
-The Linux jump host must be boring and repeatable. If every operator installs
-tools a little differently, the sample becomes hard to teach and harder to
-debug. Module 2 makes the host deterministic.
-
-That repeatability matters for security as well. The jump host is the only place
-that reaches the private AKS control plane from inside the VNet, so it stays
-minimal, identity-based, and separated from the workload namespaces. The cluster
-bootstrap that follows applies the current hardening baseline for workload
-runtime: Pod Security Admission baseline labels, a default-deny ingress
-NetworkPolicy, and namespace resource guardrails. That keeps the operator path
-and the workload path aligned with the same enterprise posture.
-
-The same boundary applies to private data-plane artifacts. Your workstation can
-run Azure control-plane deploy and verify steps through Bastion-assisted helper
-commands, but private ACR pushes, private Storage uploads for Anyscale working
-directories, Key Vault signing operations, and the full Anyscale job/service
-proofs belong on the Linux jump host where private DNS resolves inside the VNet.
-
-The optional Windows browser host is equally constrained: it is a **browser
-desktop only**. It never owns Terraform state, never runs Podman, and never runs
-Anyscale CLI automation.
+Terraform always runs on the workstation. It is not installed or run on the
+Linux jump host. The optional Windows browser jump host is used only for
+interactive browser access through Bastion.
 
 ## Prerequisites
 
-- Module 1 applied successfully (`module 1 verify` passes).
-- You can open a Bastion SSH session to the Linux jump host
-  (`module 1 connect`).
+- Module 1 apply completed and the following command passes on the workstation:
 
-## Exercise 1: Sync the repository and environment
+  ```bash
+  ./scripts/anyscale-aks.sh module 1 verify
+  ```
 
-```bash
-./scripts/anyscale-aks.sh module 2 sync
-```
+- The workstation has Azure CLI, `rsync`, and the private key identified by
+  `SSH_PRIVATE_KEY_PATH`.
+- The Linux jump host is reachable through:
 
-This `rsync`s the repository content and your `.env` to the canonical VM path
-over a Bastion tunnel, and forces `ANYSCALE_EXECUTION_MODE=jump-host` in the VM
-`.env` so Module 3 uses direct private AKS access.
+  ```bash
+  ./scripts/anyscale-aks.sh module 1 connect
+  ```
 
-> Secrets are never committed. If you need a token for non-interactive Anyscale
-> CLI work, fetch it at runtime from Key Vault or set it up on the VM directly —
-> do not place it in a tracked file.
+- `.env` exists on the workstation. The sync procedure copies it to the Linux
+  jump host; it is never read from Git.
+- Module 1 applied the firewall egress lists needed by the bootstrap. If your
+  organization changed those lists, confirm that `TF_VAR_tool_bootstrap_fqdns`
+  still permits the package and installer destinations in `.env-template`.
 
-### Alternative: clone from a fork instead of rsyncing the code
+## Configuration
 
-If this repository is hosted at a URL the jump host can reach (for example a
-public GitHub fork), you can have the host **clone itself** during bootstrap
-instead of rsyncing the source tree. Set `ANYSCALE_AKS_REPO_URL` in your
-**workstation** `.env`:
+No new Terraform decisions are required for this module. The workstation uses
+`SSH_PRIVATE_KEY_PATH` to synchronize through Bastion. `module 2 sync` writes
+`ANYSCALE_EXECUTION_MODE=jump-host` only to the jump-host copy of `.env`.
 
-```ini
-ANYSCALE_AKS_REPO_URL=https://github.com/<your-org>/<your-fork>
-```
+> **Warning:** Do not set the workstation copy of `.env` to jump-host mode.
+> Terraform must keep running on the workstation.
 
-When `scripts/bootstrap-jump-host.sh` runs and the repo is not already present,
-`ensure_repo()` sees `ANYSCALE_AKS_REPO_URL` is set and runs `git clone` instead
-of waiting for an rsync. `github.com` and `*.githubusercontent.com` are already in
-the default firewall allow-list (`TF_VAR_tool_bootstrap_fqdns`), so the clone
-succeeds from inside the VNet.
+Use cached OAuth for the Anyscale CLI. `ANYSCALE_CLI_TOKEN` is only for an
+approved non-interactive flow and must never be committed or printed.
 
-This does **not** replace `module 2 sync`:
+The canonical repository path on the Linux jump host is
+`/opt/anyscale-aks-sample`.
 
-| | `module 2 sync` (default) | `ANYSCALE_AKS_REPO_URL` git clone |
-| --- | --- | --- |
-| Copies your gitignored `.env` | Yes | No — `.env` is never in git |
-| Copies local uncommitted edits | Yes | No — only committed state |
-| Needs a reachable repo URL | No | Yes |
+### Sync and Optional Clone
 
-Because `.env` is never in git, you still run `module 2 sync` at least once to
-place `.env` on the VM (the clone only saves copying the source tree). Use the
-git-clone path when you track a committed fork and don't need local edits;
-otherwise `module 2 sync` remains the simplest one-command path.
+`module 2 sync` is the default transfer path. It copies the workstation working
+tree, including uncommitted changes, and the ignored `.env` through a Bastion
+tunnel. It excludes `.git`, `.terraform`, `.cache`, `.venv`, and Terraform state.
 
-## Exercise 2: Bootstrap the Linux jump host
+When `ANYSCALE_AKS_REPO_URL` is set and the canonical repository path does not
+exist, `scripts/bootstrap-jump-host.sh` can clone that URL. A clone contains only
+committed content and never contains `.env`. The `.env` file must still be
+delivered separately; the supported `module 2 sync` command delivers it and
+also synchronizes the working tree.
 
-Open a Bastion SSH session:
+> **Note:** `.env` is never stored in Git. `module 2 sync` is the only supported
+> way to deliver it to the Linux jump host.
 
-```bash
-./scripts/anyscale-aks.sh module 1 connect
-```
+## Procedure
 
-### Review what you're about to install
+### Workstation
 
-`scripts/bootstrap-jump-host.sh` runs on the VM and installs the operator toolchain
-(idempotent — it skips anything already present):
+1. Synchronize the repository and `.env`:
 
-- System packages: `git`, `curl`, `jq`, `rsync`, `lsof`.
-- Azure CLI, plus `kubectl` and `kubelogin`.
-- Helm.
-- Python via `uv`, and Podman for custom-image builds.
-- The Anyscale CLI into a repo-local `.venv/bin/anyscale`.
+   ```bash
+   ./scripts/anyscale-aks.sh module 2 sync
+   ```
 
-Then run the bootstrap **inside the VM**:
+2. Open a Bastion SSH session:
 
-```bash
-cd /opt/anyscale-aks-sample
-./scripts/anyscale-aks.sh module 2 bootstrap
-```
+   ```bash
+   ./scripts/anyscale-aks.sh module 1 connect
+   ```
 
-## Exercise 3: Run doctor on the jump host
+### Linux Jump Host
 
-```bash
-./scripts/anyscale-aks.sh module 2 doctor
-```
+3. Change to the synchronized repository and run the bootstrap:
 
-In jump-host mode, `doctor` is execution-mode aware. It checks:
+   ```bash
+   cd /opt/anyscale-aks-sample
+   ./scripts/anyscale-aks.sh module 2 bootstrap
+   ```
 
-- Required tools on PATH and that `.env` exists.
-- Azure CLI managed-identity auth (`az login --identity`).
-- Anyscale CLI OAuth / API-key auth.
-- Podman readiness and the custom-image preflight.
+   The idempotent bootstrap installs `git`, `curl`, `jq`, `rsync`, `lsof`, Azure
+   CLI, `kubectl`, `kubelogin`, Helm, Python through `uv`, Podman, Notation, the
+   `notation-azure-kv` plugin, Syft, ORAS, and the Anyscale CLI at
+   `.venv/bin/anyscale`.
 
-## Validate Your Work
+   > **Note:** The bootstrap refuses to run on the workstation. Run it only from
+   > the Linux jump host. Because it is idempotent, you can safely rerun it.
 
-```bash
-./scripts/anyscale-aks.sh module 2 verify
-```
+4. Authenticate the Anyscale CLI on the Linux jump host:
 
-This confirms:
+   ```bash
+   ANYSCALE_HOST=https://console.azure.anyscale.com \
+     .venv/bin/anyscale login --no-browser
+   ```
 
-- `az account show` works on the VM with the managed identity.
-- `kubectl version --client`, `kubelogin --version`,
-  `helm version`, `podman version`, and `.venv/bin/anyscale --help` all succeed.
-- The repo exists at `/opt/anyscale-aks-sample`.
-- `.env` exists on the VM and selects jump-host execution mode.
+   Open the URL printed by the CLI in a workstation browser and complete the
+   sign-in. The credentials are cached on the Linux jump host.
 
-It does not run a DNS probe; no workstation private-DNS path is required because
-the private endpoints resolve from inside the VNet.
+   > **Warning:** Never copy an Anyscale token into the repository, `.env`, or
+   > any log. Cached OAuth is the supported path.
 
-```output
-[module2] PASS: az account show (managed identity)
-[module2] PASS: kubectl version --client
-[module2] PASS: kubelogin version
-[module2] PASS: helm version
-[module2] PASS: podman version
-[module2] PASS: anyscale --help
-[module2] PASS: repo present at /opt/anyscale-aks-sample
-[module2] PASS: .env selects jump-host execution mode
-[module2] Module 2 verify passed. The jump host reaches private endpoints directly from inside the VNet.
-```
+5. Run readiness checks on the Linux jump host:
 
-If you enabled the browser host:
+   ```bash
+   ./scripts/anyscale-aks.sh module 2 doctor
+   ```
+
+   Required tools, `.env`, managed-identity Azure authentication, Anyscale CLI
+   authentication, and Podman must be ready.
+
+   > **Note:** `custom-image local ACR build/push readiness` can report
+   > `not-ready` here. That is expected, because Module 3 has not created the
+   > ACR yet. Module 4 checks it again.
+
+6. Run Linux jump host validation:
+
+   ```bash
+   ./scripts/anyscale-aks.sh module 2 verify
+   ```
+
+   > **Stop:** Continue only when `module 2 verify` reports that every readiness
+   > check passed.
+
+7. Exit the SSH session before running Module 3 deployment commands:
+
+   ```bash
+   exit
+   ```
+
+### Workstation Browser Check
+
+When the Windows browser jump host is enabled, validate its infrastructure from
+the workstation, where the Terraform outputs are available:
 
 ```bash
 ./scripts/anyscale-aks.sh module 2 browser verify
 ```
 
-confirms the Windows VM accepts Entra-backed Bastion portal RDP for the
-configured user or group — again, without any local proxy.
+## Validation
+
+`module 2 verify` must run from `/opt/anyscale-aks-sample` on the Linux jump
+host. It requires these checks to pass:
+
+- `az account show` with the managed identity
+- `kubectl version --client`
+- `kubelogin --version`
+- `helm version`
+- `podman version`
+- `.venv/bin/anyscale --help`
+- Repository present at `/opt/anyscale-aks-sample`
+- `.env` contains `ANYSCALE_EXECUTION_MODE=jump-host`
+
+The validation does not require workstation access to private DNS. Private
+endpoints resolve from the Linux jump host inside the VNet.
+
+## Adapt the Lab
+
+Use `.env` to change identity scope or firewall destinations. For toolchain,
+sync, and implementation changes, see the
+[Configuration Reference](../configuration-reference.md#modification-points)
+and [Maintainer Workflows](../maintainer-workflows.md).
 
 ## Troubleshooting
 
-- **`az login --identity` fails** — confirm the Linux jump host has its
-  system-assigned managed identity enabled (Module 1) and that the identity has
-  the roles it needs in the subscription.
-- **Tool missing** — re-run `module 2 bootstrap`; it is idempotent.
-- **`.env` not in jump-host mode** — re-run `module 2 sync`, which rewrites
-  `ANYSCALE_EXECUTION_MODE=jump-host` on the VM.
+- If `module 2 sync` is run on the Linux jump host, return to the workstation.
+  The command requires workstation Terraform outputs and opens a Bastion tunnel.
+- If sync cannot find the SSH key, correct `SSH_PRIVATE_KEY_PATH` on the
+  workstation.
+- If bootstrap cannot download a tool, check Azure Firewall logs and the
+  relevant FQDN list in `.env`, then rerun the idempotent bootstrap.
+- If `az login --identity` or `az account show` fails, confirm the system-assigned
+  managed identity and its configured role scope from Module 1.
+- If Anyscale authentication is unavailable, run
+  `ANYSCALE_HOST=https://console.azure.anyscale.com .venv/bin/anyscale login`
+  on the Linux jump host. Use a token only when the specific non-interactive
+  operation requires one.
+- If verification reports the wrong execution mode, rerun `module 2 sync` from
+  the workstation.
+- If verification reports a missing tool, rerun `module 2 bootstrap` on the
+  Linux jump host.
 
-## Clean Up Or Continue
+## Next Step
 
-Nothing to clean up here — the jump host is part of the foundation.
-
-When you are ready for Module 3, exit the jump-host SSH session and return to
-your workstation:
-
-```bash
-exit
-```
-
-Module 3 `deploy` runs **from your workstation**, not the jump host.
-
-## Summary
-
-The Linux jump host is now a repeatable, secret-free operator workstation inside
-the VNet, authenticating with a managed identity and ready to deploy the
-lab workload. The optional Windows browser host is verified for interactive
-browser validation later.
-
-## Next unit
-
-Continue to [Module 3: Deploy and Prove the Lab Workload](module-3-lab-workload.md).
+Return to the workstation and continue to
+[Module 3: Deploy and Prove the Lab Workload](module-3-lab-workload.md).

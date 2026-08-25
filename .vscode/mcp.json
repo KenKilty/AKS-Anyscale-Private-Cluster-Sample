@@ -1,0 +1,15 @@
+{
+  "servers": {
+    "terraform": {
+      "type": "stdio",
+      "command": "podman",
+      "args": [
+        "run",
+        "-i",
+        "--rm",
+        "docker.io/hashicorp/terraform-mcp-server:1.2.0",
+        "--toolsets=registry"
+      ]
+    }
+  }
+}

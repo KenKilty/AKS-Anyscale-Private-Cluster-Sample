@@ -1,25 +1,31 @@
 #!/usr/bin/env bash
 # Idempotent in-cluster Kubernetes bootstrap for the Anyscale private AKS setup.
-# Runs on the Linux jump host from inside the VNet after the AKS cluster exists.
 #
-# Usage: ./scripts/bootstrap-k8s.sh phase-a | phase-b
-#
-# phase-a  operator namespace, ServiceAccount, gpu-resources namespace,
-#          NVIDIA device plugin, and Anyscale Gateway (no TLS secret names).
-# phase-b  re-run Anyscale Gateway helm upgrade with TLS secret names
-#          derived from CLOUD_DEPLOYMENT_ID.
-#
-# Required env vars (set by orchestrator via invoke_jump_host_bootstrap):
-#   AKS_CLUSTER_NAME, AKS_RG
-#   OPERATOR_NAMESPACE, OPERATOR_SA_NAME
-#   WORKLOAD_IDENTITY_CLIENT_ID, WORKLOAD_IDENTITY_TENANT_ID
-#   EXTENSION_RELEASE_NAME
-#   GPU_RESOURCES_NAMESPACE
-#   NVIDIA_RELEASE_NAME, NVIDIA_CHART_VERSION
-#   GATEWAY_RELEASE_NAME, GATEWAY_NAME, GATEWAY_CLASS_NAME, GATEWAY_SERVICE_NAME
-#   GATEWAY_PRIVATE_IP
-#   CLOUD_DEPLOYMENT_ID        (phase-b only)
-#   GATEWAY_SERVICE_HTTPS_ENABLED  (optional; default false)
+# Purpose: apply the in-cluster prerequisites the Anyscale operator needs, in
+#          two phases either side of the platform Terraform apply.
+#          phase-a  operator namespace, ServiceAccount, gpu-resources namespace,
+#                   NVIDIA device plugin, and the Anyscale Gateway with no TLS
+#                   secret names.
+#          phase-b  re-run the Gateway helm upgrade with TLS secret names
+#                   derived from CLOUD_DEPLOYMENT_ID.
+# Usage:   ./scripts/bootstrap-k8s.sh phase-a | phase-b
+#          Runs on the Linux jump host from inside the VNet, after the AKS
+#          cluster exists. setup.sh invoke_jump_host_bootstrap syncs this script
+#          to the jump host and invokes it over the Bastion SSH tunnel.
+# Inputs:  a working kubeconfig for the private cluster, plus these env vars set
+#          by the orchestrator:
+#            AKS_CLUSTER_NAME, AKS_RG
+#            OPERATOR_NAMESPACE, OPERATOR_SA_NAME
+#            WORKLOAD_IDENTITY_CLIENT_ID, WORKLOAD_IDENTITY_TENANT_ID
+#            EXTENSION_RELEASE_NAME
+#            GPU_RESOURCES_NAMESPACE
+#            NVIDIA_RELEASE_NAME, NVIDIA_CHART_VERSION
+#            GATEWAY_RELEASE_NAME, GATEWAY_NAME, GATEWAY_CLASS_NAME,
+#            GATEWAY_SERVICE_NAME, GATEWAY_PRIVATE_IP
+#            CLOUD_DEPLOYMENT_ID            (phase-b only)
+#            GATEWAY_SERVICE_HTTPS_ENABLED  (optional; default false)
+# Outputs: progress logs on stdout; applied Kubernetes and Helm resources in the
+#          cluster; non-zero exit when a phase cannot complete.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -103,7 +109,7 @@ recover_stuck_helm_release() {
   helm uninstall "${release_name}" --namespace "${namespace}" --wait=false >/dev/null 2>&1 || true
 
   while [[ ${attempts} -lt 12 ]]; do
-    if ! helm status "${release_name}" --namespace "${namespace}" >/dev/null 2>&1 && \
+    if ! helm status "${release_name}" --namespace "${namespace}" >/dev/null 2>&1 &&
       ! kubectl get secrets -n "${namespace}" -o name 2>/dev/null | grep -qE "^secret/sh\\.helm\\.release\\.v1\\.${release_name}\\."; then
       return 0
     fi
@@ -275,7 +281,7 @@ gateway_upgrade() {
     printf '  allowedRoutes:\n'
     printf '    namespaces:\n'
     printf '      from: Same\n'
-  } > "${gateway_values_file}"
+  } >"${gateway_values_file}"
 
   log "helm upgrade --install ${GATEWAY_RELEASE_NAME} (cloud_deployment_id=${cloud_deployment_id:-<empty>}) ..."
   helm upgrade --install "${GATEWAY_RELEASE_NAME}" \
@@ -357,7 +363,7 @@ EOF
 
   local nvidia_values_file
   nvidia_values_file="$(mktemp)"
-  cat > "${nvidia_values_file}" <<'NVVALS'
+  cat >"${nvidia_values_file}" <<'NVVALS'
 affinity:
   nodeAffinity:
     requiredDuringSchedulingIgnoredDuringExecution:

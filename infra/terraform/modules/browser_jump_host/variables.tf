@@ -4,8 +4,14 @@ variable "enabled" {
   description = "Create the optional Windows 11 browser jump host when true."
 }
 
-variable "resource_group_name" { type = string }
-variable "location" { type = string }
+variable "resource_group_name" {
+  type = string
+}
+
+variable "location" {
+  type = string
+}
+
 variable "tags" {
   type    = map(string)
   default = {}

@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
+"""Ray Serve GPU deployment used to prove the private service path.
+
+Returns GPU_SERVE_SERVICE_PROOF_OK in its response body. The harness probes the
+private service endpoint and treats that marker in the response as the proof.
+"""
+
 from __future__ import annotations
 
 from typing import Any
-
-from ray import serve
-from starlette.requests import Request
 
 from build_train_serve_common import (
     GPU_SERVE_SERVICE_SUCCESS_MARKER,
@@ -14,6 +17,8 @@ from build_train_serve_common import (
     require_gpu_assignment,
     use_gpu_requested,
 )
+from ray import serve
+from starlette.requests import Request
 
 RAY_ACTOR_OPTIONS = {"num_cpus": 1}
 if use_gpu_requested():

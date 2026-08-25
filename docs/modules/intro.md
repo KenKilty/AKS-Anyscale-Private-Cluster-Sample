@@ -1,102 +1,136 @@
-# Anyscale on Private AKS — Hands-On Lab
+# Anyscale on Private AKS Lab
 
-> **Difficulty:** Advanced | **Roles:** Platform Engineer, DevOps Engineer | **Time:** ~10 min to read; 2–3 hrs to complete
+This lab deploys and validates Anyscale on a private Azure Kubernetes Service
+(AKS) cluster. Commands use `./scripts/anyscale-aks.sh`; deployment inputs come
+from the repository-root `.env` file.
 
-Welcome. This lab teaches you how to operate Anyscale on a **private** Azure
-Kubernetes Service (AKS) cluster the way a platform team would in production:
-from a trusted automation host inside the virtual network, not from a developer
-laptop with broad network reach.
+The lessons assume Azure 200-level knowledge: you can select a subscription,
+use Azure CLI, read a Terraform plan, and recognize common networking, identity,
+and RBAC concepts. Deep AKS, Kubernetes, or Anyscale experience is not required.
+Each module identifies where to run a command and provides a checkpoint before
+you continue.
 
-You will work through five modules. Each one builds on the previous one, and
-each maps to a `module` subcommand of `./scripts/anyscale-aks.sh`.
+## Module Map
 
-| Module | You build | Primary command |
-| --- | --- | --- |
-| [Module 1: Foundation](module-1-foundation.md) | The network boundary, Bastion, Linux automation jump host, and optional Windows browser jump host. | `module 1` |
-| [Module 2: Jump hosts](module-2-jump-hosts.md) | A repeatable in-VNet operator workstation on the Linux jump host (and optional Windows browser host readiness). | `module 2` |
-| [Module 3: Lab workload](module-3-lab-workload.md) | Private AKS, private ACR, the Anyscale cloud, and the workload proofs. | `module 3` |
-| [Module 4: Custom images](module-4-custom-image.md) | The custom-image requirement: prove standard-image failure, build and push a custom Ray image to the private ACR, and prove the dependency loads. | `module 4` |
-| [Module 5: Image Integrity](module-5-image-integrity.md) | Sign the custom image and verify it with AKS Image Integrity (Ratify + Azure Policy): signed images are compliant, unsigned images are flagged. | `module 5` |
+| Module | Scope | Depends on | Required |
+| --- | --- | --- | --- |
+| [1. Foundation](module-1-foundation.md) | VNet, firewall, DNS, Bastion, Linux jump host, and optional Windows browser jump host. | None | Yes |
+| [2. Jump Hosts](module-2-jump-hosts.md) | Linux jump-host toolchain, managed-identity access, and optional Windows browser jump-host verification. | Module 1 | Yes |
+| [3. Lab Workload](module-3-lab-workload.md) | Private AKS, private ACR, Anyscale platform, workspaces, and workload proofs. | Modules 1 and 2 | Yes |
+| [4. Custom Images](module-4-custom-image.md) | Private ACR image build, dependency proof, signature, and SBOM. | Modules 1 through 3 | Optional; required for Module 5 |
+| [5. Image Integrity](module-5-image-integrity.md) | Ratify and Azure Policy audit of signed and unsigned images. | Modules 1 through 4 | Optional |
 
-By the end of this lab, you're able to:
+Use [Browser Access](browser-access.md) when an operator needs a browser inside
+the VNet. Finish with [Clean Up](cleanup.md) to drain Anyscale resources and
+destroy the Azure resources.
 
-- Build a private AKS network boundary: VNet, Bastion, firewall, DNS resolver, and jump hosts.
-- Bootstrap an in-VNet Linux automation host that authenticates with a managed identity — no stored secrets.
-- Deploy private AKS with Anyscale on Azure and validate it with deterministic CPU, GPU, build, train, and serve proofs.
-- Demonstrate the custom-image requirement and prove a private-data-plane dependency loads from a private ACR.
-
-The five modules build on each other, and the unattended `e2e` command runs the same
-stages end to end:
+The five modules build on each other. The `e2e` shortcut automates deployment,
+verification, custom-image build/SBOM/proof, workload proofs, and optional
+teardown. Image signing and Module 5 remain explicit guided steps:
 
 ```mermaid
 flowchart LR
-    M1["Module 1<br/>Foundation<br/>network, Bastion, jump hosts"] --> M2["Module 2<br/>Jump hosts<br/>toolchain + managed identity"]
+    M1["Module 1<br/>Foundation<br/>network, Bastion, jump hosts"] --> M2["Module 2<br/>Jump hosts<br/>toolchain and managed identity"]
     M2 --> M3["Module 3<br/>Lab workload<br/>private AKS, ACR, proofs"]
-    M3 --> M4["Module 4<br/>Custom images<br/>Podman build + ACR + proof"]
-    M4 --> M5["Module 5<br/>Image Integrity<br/>sign + verify signatures"]
-    M5 --> Clean["Clean up<br/>drain + destroy"]
-    E2E["e2e --mode jump-host --custom-image --teardown"] -.runs all stages.-> M4
+    M3 --> M4["Module 4<br/>Custom images<br/>build + sign + SBOM + proof"]
+    M4 --> M5["Module 5<br/>Image Integrity<br/>Ratify + policy audit"]
+    M5 --> Clean["Clean Up<br/>drain + destroy"]
+    E2E["e2e --mode jump-host --custom-image --teardown<br/>excludes signing and Module 5"] -. automated subset .-> M4
 ```
 
-One cross-cutting lesson is available throughout the lab:
-
-- [Browser access](browser-access.md) — how to reach private Anyscale workspace
-  and service URLs from a browser, and why that is separate from API access.
-
-After Module 5, finish with [Clean up](cleanup.md) to drain Anyscale resources
-and tear down the lab.
-
-## Why a jump host
+## Access Model
 
 The workload AKS cluster is private. Its API server, storage, and container
 registry have no public endpoints. Rather than punch routed connectivity from
-every operator laptop into the VNet, you stand up a **Linux automation jump
-host** inside the VNet and run post-configuration and private operations —
-`kubectl`, Helm, Podman, and the Anyscale CLI — from there. Terraform stays on
-your workstation/client and is never run from the jump host. The jump host
-authenticates to Azure with a **managed identity**, so there are no long-lived
-secrets on the box.
+every operator workstation into the VNet, the deployment provides a **Linux
+jump host** inside the VNet. Private operations such as `kubectl`, Helm, Podman,
+and Anyscale CLI submissions run there. Terraform runs only on the operator
+workstation. The Linux jump host authenticates to Azure with a managed identity.
 
 The optional **Windows 11 browser jump host** solves a different problem:
 console-launched Anyscale URLs redirect to private `*.azure.anyscaleuserdata.com`
 hostnames. A browser running *inside* the VNet resolves and reaches them
 natively. See [browser-access.md](browser-access.md).
 
-## Two ways to run every module
+## Run Modes
 
-Every module can be run two ways, and both execute the same underlying stages:
+Run the lab by module or as one lifecycle:
 
-- **Step by step** — run each `module N <stage>` command yourself and read the
-  output. This is the recommended path while learning.
-- **Unattended** — run the full lifecycle in one command:
+- **By module:** run each `module N <stage>` command from its module page.
+- **Automated subset:** run deployment, verification, selected custom-image
+  stages, workload proofs, and teardown in one command:
 
   ```bash
   ./scripts/anyscale-aks.sh e2e --mode jump-host --custom-image --teardown
   ```
 
-## Execution modes
+> **Warning:** Do not use the unattended `e2e` path for a first run. Work
+> through the modules interactively so every checkpoint stays visible. The
+> `--teardown` flag destroys the lab at the end of the run.
+
+## Execution Modes
 
 The harness behaves differently depending on `ANYSCALE_EXECUTION_MODE`:
 
-- `workstation` (default) — the classic path. Operator runs from a laptop and
-  reaches the private AKS API through a Bastion tunnel.
-- `jump-host` — the lab path. Operator runs from the Linux jump host with
-  managed-identity auth and **direct** private AKS API access. No Bastion tunnel
-  is needed for normal operations.
+- `workstation` is the default. The harness uses Azure CLI authentication and a
+  Bastion-backed kubeconfig to reach the private AKS API.
+- `jump-host` runs private post-configuration and proof operations on the Linux
+  jump host with managed-identity authentication and direct VNet access.
 
-You do not have to set `ANYSCALE_EXECUTION_MODE` by hand when you use the module
-commands — Module 2 writes it into the jump host `.env`, and `e2e --mode
-jump-host` sets it for you.
+Terraform remains on the operator workstation in both modes. Module 2 writes
+`ANYSCALE_EXECUTION_MODE=jump-host` to the synced jump-host `.env`; `e2e --mode
+jump-host` selects the same path for the full lifecycle.
 
 ## Prerequisites
 
-- An Azure subscription where you can create networking, AKS, ACR, VMs, and role
-  assignments.
-- Azure CLI signed in on the machine you start from (`az login`).
-- An Anyscale on Azure account reachable at `https://console.azure.anyscale.com`.
-- The tools listed by `./scripts/anyscale-aks.sh doctor`. Module 2 installs
-  these automatically on the jump host.
+> **Warning:** This lab creates billable Azure resources, including Azure
+> Firewall, Bastion, AKS, virtual machines, storage, ACR, Key Vault, and Log
+> Analytics. Use a dedicated test subscription and run [Clean Up](cleanup.md)
+> when you finish.
 
-## Next unit
+- A dedicated Azure test subscription, or permission to create a dedicated
+  resource group in one.
+- `Owner` on the target subscription, or an approved combination of roles that
+  can create the listed resources, role assignments, marketplace resources, and
+  Azure Policy assignments. For least privilege, have your Azure administrator
+  review the plan before granting access.
+- Required Azure resource providers registered in the target subscription,
+  including `Microsoft.ContainerService`, `Microsoft.Compute`,
+  `Microsoft.Network`, `Microsoft.Storage`, `Microsoft.ManagedIdentity`,
+  `Microsoft.Authorization`, and `Microsoft.MarketplaceOrdering`.
+- Quota and regional availability for the VM sizes in `.env-template`. The
+  default GPU pool uses `Standard_NC16as_T4_v3`; Module 3 explains how to omit
+  the GPU path.
+- Azure CLI authenticated on the operator workstation with `az login`, with the
+  intended subscription selected by `az account set --subscription <name-or-id>`.
+- An Anyscale on Azure account that can sign in at
+  `https://console.azure.anyscale.com`. If your organization does not have
+  access, contact its Anyscale administrator or Anyscale before starting.
+- A repository-root `.env` copied from `.env-template` and populated with every
+  required `TF_VAR_*` input.
+- The local tools checked by `./scripts/anyscale-aks.sh doctor`. Module 2
+  installs the private-operation toolchain on the Linux jump host.
+
+> **Note:** The first deployment may require acceptance of the Anyscale AKS
+> Operator Azure Marketplace terms in the target subscription. The harness
+> reports this before it changes resources. Use an identity authorized to accept
+> the terms, or have a subscription administrator accept them.
+
+Before Module 1, run this non-deploying readiness check from the repository root
+on the workstation:
+
+```bash
+./scripts/anyscale-aks.sh doctor
+```
+
+Resolve missing required workstation tools, `.env`, Azure authentication, and
+Anyscale authentication before continuing.
+
+> **Note:** Some `doctor` findings are expected this early. Before the first
+> Terraform plan it reports that Terraform is not initialized, and Module 1
+> initializes it. Podman and the image-signing tools matter only in Modules 4
+> and 5. VM availability and quota are checked in Modules 1 and 3.
+
+## Start
 
 Start with [Module 1: Build the Foundation](module-1-foundation.md).

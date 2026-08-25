@@ -1,16 +1,22 @@
 #!/usr/bin/env bash
 # Module 5 — AKS Image Integrity (signature verification).
 #
-# Thin wrapper that maps the learning-module commands onto the image-integrity
-# implementation in setup.sh / anyscale-aks.sh. No verification logic lives here.
-#
-# AKS Image Integrity is audit-only by design: unsigned images are flagged
-# non-compliant in Azure Policy but are not blocked from running.
+# Purpose: thin wrapper mapping the learning-module commands onto the
+#          image-integrity implementation in setup.sh / anyscale-aks.sh. No
+#          verification logic lives here.
+#          Image Integrity is audit-only by design: unsigned images are flagged
+#          non-compliant in Azure Policy but are not blocked from running.
+# Usage:   ./scripts/anyscale-aks.sh module 5 {preflight|apply-ratify}
+#          Runs on the Linux jump host.
+# Inputs:  the synced .env; TF_VAR_enable_image_integrity=true applied by
+#          Terraform; the aks-preview Azure CLI extension.
+# Outputs: IMAGE_INTEGRITY_PREFLIGHT_OK and IMAGE_INTEGRITY_RATIFY_OK markers on
+#          stdout; applied Ratify resources in the cluster; non-zero exit on
+#          failure.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-ROOT_DIR="$(cd "${SCRIPTS_DIR}/.." && pwd)"
 DISPATCHER="${SCRIPTS_DIR}/anyscale-aks.sh"
 
 LOG_INFO_PREFIX="module5"
@@ -43,10 +49,10 @@ main() {
   local action="${1:-}"
   shift || true
   case "${action}" in
-    preflight|apply-ratify)
+    preflight | apply-ratify)
       dispatch image-integrity "${action}" "$@"
       ;;
-    ""|--help|-h) usage ;;
+    "" | --help | -h) usage ;;
     *) die "Unknown 'module 5' subcommand: ${action}. Run 'module 5 --help'." ;;
   esac
 }

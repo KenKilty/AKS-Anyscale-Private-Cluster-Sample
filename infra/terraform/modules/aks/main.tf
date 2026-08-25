@@ -61,6 +61,10 @@ resource "azurerm_kubernetes_cluster" "this" {
   private_dns_zone_id                 = var.private_dns_zone_id
   private_cluster_public_fqdn_enabled = false
 
+  node_provisioning_profile {
+    mode = "Manual"
+  }
+
   # Workload identity / OIDC.
   oidc_issuer_enabled       = true
   workload_identity_enabled = true
@@ -103,6 +107,7 @@ resource "azurerm_kubernetes_cluster" "this" {
     vnet_subnet_id               = var.nodes_subnet_id
     os_disk_size_gb              = 64
     type                         = "VirtualMachineScaleSets"
+    temporary_name_for_rotation  = "systmp"
     auto_scaling_enabled         = true
     min_count                    = var.system_node_pool_min_count
     max_count                    = var.system_node_pool_max_count
@@ -212,13 +217,14 @@ resource "azapi_update_resource" "app_routing_istio" {
 # CPU node pool — On-demand
 ###############################################################################
 resource "azurerm_kubernetes_cluster_node_pool" "cpu" {
-  name                  = "cpu"
-  kubernetes_cluster_id = azurerm_kubernetes_cluster.this.id
-  vm_size               = var.cpu_vm_size
-  mode                  = "User"
-  vnet_subnet_id        = var.nodes_subnet_id
-  os_disk_size_gb       = 128
-  zones                 = var.availability_zones
+  name                        = "cpu"
+  kubernetes_cluster_id       = azurerm_kubernetes_cluster.this.id
+  temporary_name_for_rotation = "cputmp"
+  vm_size                     = var.cpu_vm_size
+  mode                        = "User"
+  vnet_subnet_id              = var.nodes_subnet_id
+  os_disk_size_gb             = 128
+  zones                       = var.availability_zones
 
   auto_scaling_enabled = true
   min_count            = 0

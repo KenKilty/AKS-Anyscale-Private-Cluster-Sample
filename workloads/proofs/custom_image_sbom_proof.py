@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+"""Prove the SBOM attached to the custom image lists the packaged dependency.
+
+Emits CUSTOM_IMAGE_SBOM_PROOF_OK only when the pulled SBOM referrer contains the
+required dependency.
+"""
+
 from __future__ import annotations
 
 import json

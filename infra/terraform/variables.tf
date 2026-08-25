@@ -33,12 +33,12 @@ variable "environment" {
 }
 
 variable "azure_location" {
-  description = "Azure region (e.g. westus3)."
+  description = "Azure region (e.g. westus2)."
   type        = string
 }
 
 variable "region_short" {
-  description = "Short region code used in resource names (e.g. wus3, wus2, eus2)."
+  description = "Short region code used in resource names (e.g. wus2, eus2)."
   type        = string
   validation {
     condition     = can(regex("^[a-z0-9]{2,6}$", var.region_short))
@@ -46,28 +46,40 @@ variable "region_short" {
   }
 }
 
+variable "global_name_suffix" {
+  description = "Optional lowercase alphanumeric suffix for globally unique Storage Account, ACR, and Key Vault names. Leave empty to preserve the default names."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[a-z0-9]{0,6}$", var.global_name_suffix))
+    error_message = "global_name_suffix must be empty or 1-6 lowercase alphanumeric characters."
+  }
+}
+
 ###############################################################################
-# Cluster access principals (explicit RBAC). Defaults preserve the legacy
-# behavior of granting the Terraform-executing principal admin/user access.
+# Cluster access principals (explicit RBAC). The Terraform-executing principal
+# receives admin/user access when assign_current_principal_cluster_access is true.
 # In jump-host mode set assign_current_principal_cluster_access = false and
 # pass explicit principal maps (jump-host MI, human admins/users).
 ###############################################################################
 variable "assign_current_principal_cluster_access" {
   description = "Grant the Terraform-executing principal AKS Cluster User + RBAC Cluster Admin. Disable in jump-host mode and use explicit principal maps."
   type        = bool
-  default     = true
 }
 
 variable "aks_cluster_admin_principal_ids" {
   description = "Entra object IDs to grant Azure Kubernetes Service RBAC Cluster Admin, keyed by stable label (e.g. jump_host, platform_admins)."
   type        = map(string)
-  default     = {}
 }
 
 variable "aks_cluster_user_principal_ids" {
   description = "Entra object IDs to grant Azure Kubernetes Service Cluster User Role, keyed by stable label."
   type        = map(string)
-  default     = {}
+}
+
+variable "acr_push_principal_ids" {
+  description = "Entra object IDs to grant AcrPush on the private registry, keyed by stable label."
+  type        = map(string)
 }
 
 ###############################################################################
@@ -164,12 +176,6 @@ variable "container_registry_fqdns" {
 variable "azure_identity_fqdns" {
   description = "Microsoft identity and ARM endpoints permitted for AKS Workload Identity token exchange and Azure SDK/CLI data-plane auth flows."
   type        = list(string)
-  default = [
-    "login.microsoftonline.com",
-    "*.login.microsoftonline.com",
-    "sts.windows.net",
-    "management.azure.com",
-  ]
 
   validation {
     condition     = length(var.azure_identity_fqdns) > 0 && alltrue([for fqdn in var.azure_identity_fqdns : can(regex("^(\\*\\.)?([A-Za-z0-9-]+\\.)+[A-Za-z]{2,}$", fqdn))])
@@ -177,20 +183,19 @@ variable "azure_identity_fqdns" {
   }
 }
 
+variable "azure_portal_fqdns" {
+  description = "Azure Portal authentication and framework FQDNs permitted from the Windows browser jump-host subnet."
+  type        = list(string)
+
+  validation {
+    condition     = alltrue([for fqdn in var.azure_portal_fqdns : can(regex("^(\\*\\.)?([A-Za-z0-9-]+\\.)+[A-Za-z]{2,}$", fqdn))])
+    error_message = "azure_portal_fqdns must contain valid FQDNs, optionally prefixed with *."
+  }
+}
+
 variable "azure_monitor_fqdns" {
   description = "Azure Monitor, Log Analytics, and Azure Monitor Agent endpoints permitted for diagnostics and Container Insights when public egress fallback is required. AMPLS private endpoints are created separately."
   type        = list(string)
-  default = [
-    "global.handler.control.monitor.azure.com",
-    "*.handler.control.monitor.azure.com",
-    "global.prod.microsoftmetrics.com",
-    "*.monitoring.azure.com",
-    "*.ods.opinsights.azure.com",
-    "*.oms.opinsights.azure.com",
-    "*.agentsvc.azure-automation.net",
-    "*.ingest.monitor.azure.com",
-    "*.monitor.azure.com",
-  ]
 
   validation {
     condition     = length(var.azure_monitor_fqdns) > 0 && alltrue([for fqdn in var.azure_monitor_fqdns : can(regex("^(\\*\\.)?([A-Za-z0-9-]+\\.)+[A-Za-z]{2,}$", fqdn))])
@@ -201,25 +206,20 @@ variable "azure_monitor_fqdns" {
 variable "tool_bootstrap_fqdns" {
   description = "Jump-host egress FQDNs for tool and Kubernetes bootstrap setup."
   type        = list(string)
-  default = [
-    "packages.microsoft.com",
-    "aka.ms",
-    "azurecliprod.blob.core.windows.net",
-    "azure.archive.ubuntu.com",
-    "security.ubuntu.com",
-    "apt.releases.hashicorp.com",
-    "dl.k8s.io",
-    "cdn.dl.k8s.io",
-    "get.helm.sh",
-    "astral.sh",
-    "releases.astral.sh",
-    "pypi.org",
-    "files.pythonhosted.org",
-    "github.com",
-    "api.github.com",
-    "*.githubusercontent.com",
-    "nvidia.github.io",
-  ]
+}
+
+variable "anyscale_jump_host_fqdns" {
+  description = <<-EOT
+    Anyscale FQDNs the Linux jump host may reach through the firewall on 443.
+
+    Kept separate from anyscale_fqdns because the two callers differ: the
+    in-cluster operator polls only the control plane URL, while the Anyscale CLI
+    on the jump host also reaches the API and browser-auth hosts for login,
+    job submit, and workspace registration.
+
+    Leave empty to fall back to anyscale_fqdns, which is the pre-split behavior.
+  EOT
+  type        = list(string)
 }
 
 ###############################################################################
@@ -231,8 +231,7 @@ variable "linux_jump_host_vm_size" {
 }
 
 variable "linux_jump_host_admin_username" {
-  type    = string
-  default = "azureoperator"
+  type = string
 }
 
 variable "linux_jump_host_admin_ssh_public_key" {
@@ -242,54 +241,55 @@ variable "linux_jump_host_admin_ssh_public_key" {
 
 variable "linux_jump_host_custom_data" {
   type        = string
-  default     = null
   description = "Optional base64-encoded cloud-init payload for first boot."
 }
 
 variable "enable_browser_host" {
-  type    = bool
-  default = false
+  type = bool
 }
 
 variable "windows_browser_jump_host_vm_size" {
   type        = string
-  default     = "Standard_D4s_v5"
   description = "Windows browser jump-host VM size."
 }
 
 variable "windows_browser_jump_host_admin_username" {
-  type    = string
-  default = "azureadmin"
+  type = string
 }
 
 variable "windows_browser_jump_host_admin_password" {
   type        = string
   sensitive   = true
-  default     = ""
   description = "Local administrator password required by Azure when the browser host is enabled."
 }
 
 variable "browser_host_vm_user_login_principal_ids" {
   type        = map(string)
-  default     = {}
   description = "Map of key => principal_id granted Virtual Machine User Login on the browser host."
 }
 
 variable "browser_host_vm_admin_login_principal_ids" {
   type        = map(string)
-  default     = {}
   description = "Map of key => principal_id granted Virtual Machine Administrator Login on the browser host."
+}
+
+variable "browser_host_admin_password_secret_name" {
+  type        = string
+  description = "Stable Key Vault secret name for the Windows browser host local-admin password fallback (created only when enable_browser_host is true)."
+}
+
+variable "browser_host_admin_password_secret_reader_principal_ids" {
+  type        = map(string)
+  description = "Map of key => Entra principal_id granted Key Vault Reader and Key Vault Secrets User at the vault scope so the Azure portal 'Password from Azure Key Vault' picker can list secret metadata and read the browser-host admin-password secret. The Terraform caller and Bastion identity are intentionally not auto-granted."
 }
 
 variable "assign_jump_host_subscription_contributor" {
   type        = bool
-  default     = true
   description = "Grant the Linux jump-host MI Contributor and RBAC Administrator at the configured scope."
 }
 
 variable "jump_host_rbac_scope" {
   type        = string
-  default     = ""
   description = "Override scope for jump-host role assignments. Defaults to the subscription when empty."
 }
 
@@ -304,7 +304,6 @@ variable "system_vm_size" {
 variable "availability_zones" {
   description = "Availability zones used by zone-capable enterprise resources, including the AKS system/CPU pools and Premium ACR. GPU pools can override this per pool when a GPU SKU is non-zonal in the selected region."
   type        = list(string)
-  default     = ["1", "2", "3"]
 
   validation {
     condition     = alltrue([for zone in var.availability_zones : can(regex("^[1-9][0-9]*$", zone))])
@@ -315,7 +314,6 @@ variable "availability_zones" {
 variable "aks_sku_tier" {
   description = "AKS control-plane SKU tier. Standard is recommended for production private clusters."
   type        = string
-  default     = "Standard"
 
   validation {
     condition     = contains(["Free", "Standard", "Premium"], var.aks_sku_tier)
@@ -326,7 +324,6 @@ variable "aks_sku_tier" {
 variable "system_node_pool_min_count" {
   description = "Minimum nodes in the AKS system node pool. Use at least 3 with availability zones for enterprise HA."
   type        = number
-  default     = 3
 
   validation {
     condition     = var.system_node_pool_min_count >= 1
@@ -337,7 +334,6 @@ variable "system_node_pool_min_count" {
 variable "system_node_pool_max_count" {
   description = "Maximum nodes in the AKS system node pool autoscaler."
   type        = number
-  default     = 6
 
   validation {
     condition     = var.system_node_pool_max_count >= var.system_node_pool_min_count
@@ -353,7 +349,7 @@ variable "cpu_vm_size" {
 variable "gpu_pool_configs" {
   description = <<-EOT
     GPU node pool config(s). Map key is logical label (e.g. "T4").
-    The sample .env is sized for a 32 vCPU NCASv3_T4 family quota in westus3 (max 2 nodes).
+    The sample .env is sized for a 32 vCPU NCASv3_T4 family quota in westus2 (max 2 nodes).
     Set availability_zones per pool only when the selected GPU SKU supports zones in the selected region.
     Use an empty map only for CPU-only or quota-safe validation scenarios.
   EOT
@@ -417,7 +413,6 @@ variable "anyscale_operator_namespace" {
 variable "anyscale_cli_token" {
   description = "Anyscale CLI token for the operator (global.auth.anyscaleCliToken). Stored as an AKS extension protected setting (encrypted at rest, not visible in az k8s-extension show). Leave null to install the extension without the secret; the operator will surface auth handshake failures until the token is provided."
   type        = string
-  default     = null
   sensitive   = true
 }
 
@@ -445,9 +440,6 @@ variable "anyscale_operator_identity" {
     name                = optional(string)
     manage_storage_rbac = optional(bool)
   })
-  default = {
-    mode = "create"
-  }
   validation {
     condition     = contains(["create", "existing-managed-rbac", "existing-external-rbac"], var.anyscale_operator_identity.mode)
     error_message = "anyscale_operator_identity.mode must be one of: create, existing-managed-rbac, existing-external-rbac."
@@ -484,8 +476,8 @@ variable "anyscale_platform" {
     teardown is the established Azure cloud teardown hook. It terminates the
     current cloud's jobs, services, workspaces, and backing cluster sessions,
     then deletes the Anyscale cloud before Terraform tears down the AKS
-    extension and cluster. destroy_workaround remains accepted as a legacy
-    alias for compatibility.
+    extension and cluster. When teardown values are null, matching values under
+    destroy_workaround supply the teardown-hook settings.
   EOT
 
   type = object({
@@ -494,6 +486,7 @@ variable "anyscale_platform" {
     extension_resource_name          = optional(string, "anyscaleoperator")
     extension_version                = optional(string)
     control_plane_url                = optional(string, "https://console.azure.anyscale.com")
+    operator_control_plane_url       = optional(string)
     auth_audience                    = optional(string, "api://086bc555-6989-4362-ba30-fded273e432b/.default")
     extension_configuration_settings = optional(map(string), {})
     plan_name                        = optional(string, "anyscale-operator")
@@ -515,11 +508,19 @@ variable "anyscale_platform" {
     }), {})
   })
 
-  default = {}
-
   validation {
     condition     = var.anyscale_platform.cloud_name == null || can(regex("^[A-Za-z0-9._-]+$", var.anyscale_platform.cloud_name))
     error_message = "anyscale_platform.cloud_name may contain only letters, numbers, dots, underscores, and hyphens."
+  }
+
+  validation {
+    condition     = can(regex("^https://[A-Za-z0-9.-]+(:[0-9]+)?(/.*)?$", var.anyscale_platform.control_plane_url))
+    error_message = "anyscale_platform.control_plane_url must be an https:// URL. It is the public console host used for local Anyscale CLI/OAuth and teardown (default https://console.azure.anyscale.com)."
+  }
+
+  validation {
+    condition     = var.anyscale_platform.operator_control_plane_url == null || can(regex("^https://[A-Za-z0-9.-]+(:[0-9]+)?(/.*)?$", var.anyscale_platform.operator_control_plane_url))
+    error_message = "anyscale_platform.operator_control_plane_url must be an https:// URL when set. Point it at the cloud-specific Private Link host (https://cld-<cloud-resource-id>.<zone>), not the public console."
   }
 
   validation {
@@ -538,18 +539,28 @@ variable "anyscale_platform" {
 
   validation {
     condition     = coalesce(try(var.anyscale_platform.teardown.runtime_termination_timeout_seconds, null), try(var.anyscale_platform.teardown.workspace_termination_timeout_seconds, null), try(var.anyscale_platform.destroy_workaround.runtime_termination_timeout_seconds, null), try(var.anyscale_platform.destroy_workaround.workspace_termination_timeout_seconds, null), 900) >= 60
-    error_message = "anyscale_platform.teardown.runtime_termination_timeout_seconds must be at least 60 seconds. workspace_termination_timeout_seconds and destroy_workaround remain supported as legacy aliases."
+    error_message = "The effective Anyscale platform runtime termination timeout must be at least 60 seconds."
   }
 
   validation {
     condition     = coalesce(try(var.anyscale_platform.teardown.poll_interval_seconds, null), try(var.anyscale_platform.destroy_workaround.poll_interval_seconds, null), 20) >= 5
-    error_message = "anyscale_platform.teardown.poll_interval_seconds must be at least 5 seconds. destroy_workaround remains supported as a legacy alias."
+    error_message = "The effective Anyscale platform teardown poll interval must be at least 5 seconds."
+  }
+}
+
+variable "anyscale_platform_arm_api_version" {
+  description = "ARM API version for Anyscale.Platform/clouds and cloudResources resources."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[0-9]{4}-[0-9]{2}-[0-9]{2}-preview$", var.anyscale_platform_arm_api_version))
+    error_message = "anyscale_platform_arm_api_version must be a preview API date such as 2026-08-01-preview."
   }
 }
 
 variable "anyscale_platform_admin_role_assignments" {
   description = <<-EOT
-    Legacy Azure RBAC role assignments scoped to the Anyscale Platform cloud ARM resource.
+    Azure RBAC role assignments scoped to the Anyscale Platform cloud ARM resource.
 
     Prefer anyscale_platform_role_assignments for new configuration because the
     Anyscale Platform Administrator role is only effective at subscription scope
@@ -561,7 +572,6 @@ variable "anyscale_platform_admin_role_assignments" {
     role_definition_id   = optional(string)
     role_definition_name = optional(string)
   }))
-  default = {}
 
   validation {
     condition     = alltrue([for assignment in values(var.anyscale_platform_admin_role_assignments) : can(regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", assignment.principal_id))])
@@ -604,7 +614,6 @@ variable "anyscale_platform_default_admin_assignment" {
     scope                = optional(string, "subscription")
     custom_scope         = optional(string)
   })
-  default = {}
 
   validation {
     condition     = contains(["User", "Group", "ServicePrincipal", "ForeignGroup", "Device"], var.anyscale_platform_default_admin_assignment.principal_type)
@@ -648,7 +657,6 @@ variable "anyscale_platform_role_assignments" {
     scope                = optional(string, "cloud")
     custom_scope         = optional(string)
   }))
-  default = {}
 
   validation {
     condition     = alltrue([for assignment in values(var.anyscale_platform_role_assignments) : can(regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", assignment.principal_id))])
@@ -706,8 +714,6 @@ variable "bootstrap_k8s" {
     gateway_service_https_enabled      = optional(bool, false)
   })
 
-  default = {}
-
   validation {
     condition = alltrue([
       can(regex("^[A-Za-z0-9.-]+$", var.bootstrap_k8s.gpu_resources_namespace)),
@@ -746,7 +752,6 @@ variable "storage_cors_rule" {
 variable "storage_replication_type" {
   description = "Storage account replication type. ZRS is the default enterprise posture in zone-capable regions."
   type        = string
-  default     = "ZRS"
 
   validation {
     condition     = contains(["LRS", "GRS", "RAGRS", "ZRS", "GZRS", "RAGZRS"], var.storage_replication_type)
@@ -757,7 +762,6 @@ variable "storage_replication_type" {
 variable "acr_zone_redundancy_enabled" {
   description = "Whether the Premium ACR uses zone redundancy in zone-capable regions."
   type        = bool
-  default     = true
 }
 
 ###############################################################################
@@ -766,13 +770,11 @@ variable "acr_zone_redundancy_enabled" {
 variable "azure_policy_enabled" {
   description = "Enable the Azure Policy add-on on AKS. Required for the AKS Image Integrity (Preview) feature."
   type        = bool
-  default     = true
 }
 
 variable "automatic_upgrade_channel" {
   description = "AKS automatic upgrade channel for control plane and node pools. 'patch' keeps the cluster current with security patches while preserving stability."
   type        = string
-  default     = "patch"
 
   validation {
     condition     = contains(["patch", "rapid", "node-image", "stable"], var.automatic_upgrade_channel)
@@ -783,7 +785,6 @@ variable "automatic_upgrade_channel" {
 variable "node_os_upgrade_channel" {
   description = "AKS node OS image upgrade channel. SecurityPatch keeps node image security updates moving without waiting for a full release cadence."
   type        = string
-  default     = "SecurityPatch"
 
   validation {
     condition     = contains(["SecurityPatch", "NodeImage", "None"], var.node_os_upgrade_channel)
@@ -794,49 +795,55 @@ variable "node_os_upgrade_channel" {
 variable "local_account_disabled" {
   description = "Disable local cluster admin accounts and require Entra-backed access for cluster administration."
   type        = bool
-  default     = true
 }
 
 variable "defender_enabled" {
   description = "Enable Microsoft Defender for Containers on the AKS cluster."
   type        = bool
-  default     = true
 }
 
 variable "key_vault_secrets_provider_enabled" {
   description = "Enable the AKS Key Vault Secrets Provider add-on for workload secret delivery via CSI."
   type        = bool
-  default     = true
 }
 
 variable "key_vault_purge_protection_enabled" {
   description = "Enable purge protection on the signing Key Vault. Recommended true for production; default false keeps the sample easy to tear down."
   type        = bool
-  default     = false
 }
 
 variable "key_vault_soft_delete_retention_days" {
   description = "Soft-delete retention (days) for the signing Key Vault."
   type        = number
-  default     = 7
+}
+
+variable "key_vault_public_network_access_enabled" {
+  description = "Optionally allow configured IPv4 CIDRs to reach the signing/browser-host Key Vault public endpoint. Defaults false (private endpoint only)."
+  type        = bool
+}
+
+variable "key_vault_public_access_cidrs_csv" {
+  description = "Comma-separated IPv4 CIDRs allowed through the Key Vault firewall when public access is enabled. Keep empty for private-only mode. The private endpoint remains available regardless."
+  type        = string
+
+  validation {
+    condition = (
+      !var.key_vault_public_network_access_enabled && trimspace(var.key_vault_public_access_cidrs_csv) == ""
+      ) || (
+      var.key_vault_public_network_access_enabled &&
+      trimspace(var.key_vault_public_access_cidrs_csv) != "" &&
+      alltrue([
+        for rule in split(",", var.key_vault_public_access_cidrs_csv) :
+        can(cidrhost(trimspace(rule), 0)) && can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}/([0-9]|[12][0-9]|3[0-2])$", trimspace(rule)))
+      ])
+    )
+    error_message = "key_vault_public_access_cidrs_csv must be empty when public access is disabled, or contain a comma-separated list of valid IPv4 CIDRs when enabled."
+  }
 }
 
 variable "image_signing_cert_name" {
   description = "Name of the Notation signing certificate created in Key Vault."
   type        = string
-  default     = "notation-signing-cert-v2"
-}
-
-variable "image_signing_cert_subject" {
-  description = "X.509 subject of the signing certificate; used as the trusted identity at verification time."
-  type        = string
-  default     = "CN=anyscale-private-aks-signing,O=AnyscaleAKSSample,ST=WA,C=US"
-}
-
-variable "image_signing_cert_validity_months" {
-  description = "Validity period (months) of the signing certificate."
-  type        = number
-  default     = 12
 }
 
 ###############################################################################
@@ -855,25 +862,21 @@ variable "log_analytics_retention_days" {
 variable "log_analytics_internet_ingestion_enabled" {
   description = "Whether the Log Analytics workspace accepts public ingestion. Set false when AMPLS private ingestion is enabled."
   type        = bool
-  default     = false
 }
 
 variable "log_analytics_internet_query_enabled" {
   description = "Whether the Log Analytics workspace accepts public query traffic. Kept true by default so management workstations can run proof queries while cluster ingestion is private."
   type        = bool
-  default     = true
 }
 
 variable "ampls_enabled" {
   description = "Whether to create Azure Monitor Private Link Scope, private endpoint, private DNS zone group, and scoped services for Container Insights/Log Analytics."
   type        = bool
-  default     = true
 }
 
 variable "ampls_ingestion_access_mode" {
   description = "AMPLS ingestion access mode. PrivateOnly forces ingestion through connected private networks."
   type        = string
-  default     = "PrivateOnly"
 
   validation {
     condition     = contains(["Open", "PrivateOnly"], var.ampls_ingestion_access_mode)
@@ -884,7 +887,6 @@ variable "ampls_ingestion_access_mode" {
 variable "ampls_query_access_mode" {
   description = "AMPLS query access mode. Open allows proof queries from public management workstations; PrivateOnly restricts queries to connected private networks."
   type        = string
-  default     = "Open"
 
   validation {
     condition     = contains(["Open", "PrivateOnly"], var.ampls_query_access_mode)
@@ -895,13 +897,11 @@ variable "ampls_query_access_mode" {
 variable "container_insights_v2_enabled" {
   description = "Whether the Container Insights DCR sends stdout/stderr logs to ContainerLogV2."
   type        = bool
-  default     = true
 }
 
 variable "container_insights_streams" {
   description = "Container Insights DCR streams. The default collects ContainerLogV2, Kubernetes events, and pod inventory without enabling Managed Prometheus/Grafana."
   type        = list(string)
-  default     = ["Microsoft-ContainerLogV2", "Microsoft-KubeEvents", "Microsoft-KubePodInventory"]
 
   validation {
     condition     = length(var.container_insights_streams) > 0 && alltrue([for stream in var.container_insights_streams : can(regex("^Microsoft-[A-Za-z0-9-]+$", stream))])
@@ -912,7 +912,6 @@ variable "container_insights_streams" {
 variable "container_insights_data_collection_interval" {
   description = "Container Insights data collection interval."
   type        = string
-  default     = "1m"
 
   validation {
     condition     = can(regex("^([1-9]|[12][0-9]|30)m$", var.container_insights_data_collection_interval))
@@ -923,7 +922,6 @@ variable "container_insights_data_collection_interval" {
 variable "container_insights_namespace_filtering_mode" {
   description = "Container Insights namespace filtering mode. Off collects all namespaces."
   type        = string
-  default     = "Off"
 
   validation {
     condition     = contains(["Off", "Include", "Exclude"], var.container_insights_namespace_filtering_mode)
@@ -934,19 +932,129 @@ variable "container_insights_namespace_filtering_mode" {
 variable "container_insights_namespaces" {
   description = "Namespaces used when Container Insights namespace filtering mode is Include or Exclude."
   type        = list(string)
-  default     = []
 }
 
 variable "terraform_managed_diagnostic_settings_enabled" {
   description = "Whether Terraform creates Azure Monitor diagnostic settings for AKS, Firewall, ACR, Storage, and Bastion. Leave false when Azure Policy deploys diagnostics to avoid category/data-sink conflicts."
   type        = bool
-  default     = true
 }
 
 variable "storage_diagnostic_settings_enabled" {
   description = "Whether Terraform creates Azure Monitor diagnostic settings for the storage account and blob service. When null, inherits terraform_managed_diagnostic_settings_enabled."
   type        = bool
-  default     = null
+}
+
+variable "enable_image_integrity" {
+  description = <<-EOT
+    Create the AKS Image Integrity (Ratify + Azure Policy) resources.
+
+    Requires Microsoft.Authorization/policyAssignments/write at the resource-group
+    scope; without it the apply fails with AuthorizationFailed on
+    azurerm_resource_group_policy_assignment. Set false for deployments that do
+    not run the Module 5 image-signing demo, or whose principal cannot create
+    policy assignments.
+
+    Defaults to true to preserve the behavior of earlier revisions.
+  EOT
+  type        = bool
+  nullable    = false
+}
+
+###############################################################################
+# Private Link to the Anyscale control plane
+#
+# Optional and default-off. When enabled, privatelink.tf creates a private
+# endpoint to the Anyscale Private Link Service, a private DNS zone, a VNet
+# link, and A records so in-VNet workloads resolve the cloud-specific control
+# plane hostname (cld-<cloud-resource-id>.<zone>) to a private IP instead of
+# egressing through Azure Firewall.
+###############################################################################
+variable "enable_privatelink" {
+  description = <<-EOT
+    Create a private endpoint to the Anyscale control plane instead of reaching
+    it over the internet through Azure Firewall.
+
+    When enabled, privatelink.tf creates a private endpoint against the Anyscale
+    Private Link Service, a private DNS zone, and records so in-VNet workloads
+    resolve the cloud-specific control plane hostname to a private IP.
+
+    This does NOT remove the need for egress. Private Link carries control-plane
+    traffic only; nodes still reach Microsoft Entra (no Private Link exists for
+    it), MCR, the AKS binary mirror, and Azure Resource Manager through the
+    firewall.
+
+    Requires anyscale_privatelink_service_alias and
+    anyscale_privatelink_record_names.
+  EOT
+  type        = bool
+  nullable    = false
+}
+
+variable "anyscale_privatelink_service_alias" {
+  description = <<-EOT
+    Alias of the Anyscale Private Link Service to connect to. Anyscale provides
+    this per cloud deployment, in the form
+    `<prefix>.<guid>.<region>.azure.privatelinkservice`.
+
+    The alias does not have to be in this cluster's region. A private endpoint
+    must sit in its own VNet's region, but a Private Link Service is reachable
+    from approved private endpoints in any public region. Request an in-region
+    alias only to reduce latency, not for correctness.
+
+    The connection is cross-tenant and therefore MANUAL: the endpoint stays
+    Pending until Anyscale approves it. `terraform apply` succeeds while it is
+    Pending, so a clean apply is not evidence the path works.
+  EOT
+  type        = string
+
+  validation {
+    condition     = !var.enable_privatelink || length(var.anyscale_privatelink_service_alias) > 0
+    error_message = "anyscale_privatelink_service_alias must be set when enable_privatelink is true."
+  }
+}
+
+variable "anyscale_private_dns_zone_name" {
+  description = <<-EOT
+    Private DNS zone created for Anyscale control plane resolution. Confirm the
+    exact zone with Anyscale rather than assuming; it differs by environment.
+    Observed: `azure.anyscale-cloud.dev` (production) and
+    `azure.anyscale-cloud-predeploy.dev` (predeploy).
+
+    This is NOT the public browser/OAuth console host `console.azure.anyscale.com`,
+    which stays on public DNS and the firewall path. The cloud-specific control
+    plane hostname `cld-<cloud-resource-id>.<zone>` lives under this zone.
+
+    The zone is authoritative for its whole domain inside this VNet. Once linked,
+    no other name in that domain resolves publicly from inside the VNet. Use the
+    narrowest zone that covers your control plane hostname.
+  EOT
+  type        = string
+
+  validation {
+    condition     = !var.enable_privatelink || can(regex("^[A-Za-z0-9.-]+$", var.anyscale_private_dns_zone_name))
+    error_message = "anyscale_private_dns_zone_name must be a DNS name containing only letters, numbers, dots, and hyphens."
+  }
+}
+
+variable "anyscale_privatelink_record_names" {
+  description = <<-EOT
+    Records created in the private DNS zone, each without the zone suffix. Every
+    entry becomes an A record pointing at the private endpoint's IP.
+
+    `"*"` creates a wildcard. Because the private zone is authoritative for the
+    whole domain inside the VNet, a name without a record fails to resolve rather
+    than falling back to public DNS, so a wildcard avoids enumerating every
+    hostname the operator uses. One endpoint serves the control plane
+    (`cld-<id>`), Grafana (`grafana-<id>`), and the Ray workload image registry
+    (`registry-<id>`). A wildcard does not cover the zone apex; add `"@"` if you
+    need it.
+  EOT
+  type        = list(string)
+
+  validation {
+    condition     = !var.enable_privatelink || length(var.anyscale_privatelink_record_names) > 0
+    error_message = "anyscale_privatelink_record_names must be set when enable_privatelink is true."
+  }
 }
 
 ###############################################################################

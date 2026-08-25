@@ -1,0 +1,104 @@
+# Fast selected-file checks run on commit. The mandatory full quality gate and
+# deterministic Terraform contract tests run on push and on the manual stage.
+#
+# Install once: pre-commit install --install-hooks
+# Commit checks: pre-commit run --all-files
+# Full checks:   pre-commit run --all-files --hook-stage pre-push
+#                pre-commit run --all-files --hook-stage manual
+minimum_pre_commit_version: "3.5.0"
+default_stages: [pre-commit]
+default_install_hook_types: [pre-commit, pre-push]
+
+repos:
+  - repo: local
+    hooks:
+      - id: check-agents
+        name: custom-agent and instruction validator
+        entry: python3 scripts/check_agents.py
+        language: system
+        pass_filenames: false
+        files: '^(AGENTS\.md|\.github/(agents/.*\.agent\.md|instructions/.*\.instructions\.md))$'
+
+      - id: bash-n
+        name: bash syntax
+        entry: bash -n
+        language: system
+        types: [shell]
+
+      - id: shellcheck
+        name: ShellCheck (error severity)
+        entry: shellcheck -x --severity=error
+        language: system
+        types: [shell]
+
+      - id: shfmt-check
+        name: shfmt check
+        entry: shfmt -d -i 2 -ci
+        language: system
+        types: [shell]
+
+      - id: terraform-fmt
+        name: Terraform format check
+        entry: terraform fmt -check
+        language: system
+        files: '^infra/terraform/.*\.(tf|tftest\.hcl)$'
+
+      - id: python-compile
+        name: Python compile
+        entry: python3 -X pycache_prefix=.cache/pycache -m py_compile
+        language: system
+        files: '\.py$'
+
+      - id: ruff-check
+        name: Ruff lint
+        entry: ruff check --force-exclude
+        language: system
+        files: '\.(py|pyi)$'
+
+      - id: markdownlint
+        name: Markdown lint
+        entry: markdownlint-cli2
+        language: system
+        types: [markdown]
+
+      - id: yamllint
+        name: YAML lint
+        entry: yamllint -s
+        language: system
+        types: [yaml]
+
+      - id: hadolint
+        name: Dockerfile lint
+        entry: hadolint
+        language: system
+        files: '(^|/)Dockerfile[^/]*$'
+
+      - id: trivy-staged
+        name: Trivy staged config and secret scan
+        entry: scripts/trivy-staged-scan.sh
+        language: system
+        require_serial: true
+
+      - id: full-quality-gate
+        name: full quality and security gate
+        entry: scripts/quality-gate.sh
+        language: system
+        stages: [pre-push, manual]
+        pass_filenames: false
+        always_run: true
+
+      - id: terraform-contracts
+        name: Terraform contract tests
+        entry: ./scripts/anyscale-aks.sh self-test terraform
+        language: system
+        stages: [pre-push, manual]
+        pass_filenames: false
+        always_run: true
+
+      - id: full-check-agents
+        name: full custom-agent and instruction validator
+        entry: python3 scripts/check_agents.py
+        language: system
+        stages: [pre-push, manual]
+        pass_filenames: false
+        always_run: true

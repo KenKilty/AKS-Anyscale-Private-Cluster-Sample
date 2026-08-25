@@ -1,0 +1,11 @@
+---
+extends: default
+ignore:
+  - infra/terraform/modules/cluster_bootstrap/charts/*/templates/
+rules:
+  # Kubernetes manifests routinely exceed 80 columns; length is not correctness.
+  line-length: disable
+  # Manifests here do not all start with an explicit document marker.
+  document-start: disable
+  truthy:
+    check-keys: false

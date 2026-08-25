@@ -48,10 +48,52 @@ separate task, then dispatch the reviewer as a **separate** invocation. Never le
 one agent both make and bless a change. The high-privilege `anyscale-aks-infra`
 agent is reached only by explicit named dispatch.
 
+## Communication style
+
+- Fewest words that carry the meaning. No preamble, no recap of what you just did,
+  no restating the request back.
+- No praise, no superlatives, no "you're absolutely right". Report the cold result,
+  including the parts that failed or you didn't verify.
+- Disagree when the evidence says so. A wrong instruction gets pushed back on, not
+  implemented politely.
+- Never claim something works without a real run log or a passing check.
+
 ## Git / commits
 
 Never `git commit` or `git push` unless the user explicitly says so. Read-only git
 (status, diff, log) is fine.
+
+When explicitly asked to commit:
+
+- Subject: imperative mood, capitalized, no trailing period, ≤50 chars (72 hard
+  limit). It must complete "If applied, this commit will ___".
+- Blank line, then a body wrapped at 72 chars explaining **what and why**, not how
+  — the diff already shows the how.
+
+## Bugs: reproduce before you fix
+
+When the task says something is broken, do not patch on the first plausible theory.
+
+1. Reproduce it and capture the failing output (log line, `bash -n` error, failing
+   proof marker, `terraform validate` error).
+2. Then make the fix.
+3. Re-run the same reproduction and show it passing.
+
+Two log excerpts (before and after) are the deliverable. Live proofs need an actual
+run — see the operational-safety rules before running anything mutating.
+
+## Public interfaces — renaming one is a breaking change
+
+These are contracts other things depend on. Changing or removing one needs explicit
+user approval, even when the change looks cosmetic:
+
+- `./scripts/anyscale-aks.sh` subcommands and flags.
+- `.env-template` variable names and the `TF_VAR_*` they map to.
+- Terraform module input/output names and resource addresses (renames force
+  replacement or state moves).
+- Proof markers (`*_PROOF_OK`) and the run-artifact shape under `.cache/`.
+
+Adding is cheap; renaming and removing are not.
 
 ## Operational safety (this repo deploys real Azure infrastructure)
 
@@ -70,9 +112,10 @@ No personal checkout paths in committed files.
 ## Secrets — never committed, never printed
 
 No tokens, subscription/tenant/object ids, ACR/storage keys, bearer values, or
-SSH private keys in committed files, logs, or summaries. `.env` and
-`terraform.auto.tfvars.json` are git-ignored and hold real values; keep it that
-way. When recovering Anyscale auth, use `anyscale login` (cached OAuth), never a
+SSH private keys in committed files, logs, or summaries. The repo-root `.env` is
+git-ignored, holds the real deployment values, and is exported as `TF_VAR_*` at
+deploy time (the harness no longer renders a `terraform.auto.tfvars.json`); keep
+it that way. When recovering Anyscale auth, use `anyscale login` (cached OAuth), never a
 fabricated `ANYSCALE_CLI_TOKEN`.
 
 ## User-facing language — no internal jargon

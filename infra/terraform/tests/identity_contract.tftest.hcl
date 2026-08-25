@@ -11,8 +11,8 @@
 variables {
   project        = "tftest"
   environment    = "ci"
-  azure_location = "westus3"
-  region_short   = "wus3"
+  azure_location = "westus2"
+  region_short   = "wus2"
 
   vnet_address_space = ["10.50.0.0/16"]
   subnet_cidrs = {
@@ -28,6 +28,9 @@ variables {
   }
 
   dns_forwarding_rules = {}
+
+  anyscale_jump_host_fqdns = []
+  enable_browser_host      = false
 
   anyscale_fqdns = [
     "console.anyscale.com",
@@ -104,7 +107,8 @@ variables {
     max_age_in_seconds = 0
   }
 
-  log_analytics_retention_days = 30
+  log_analytics_retention_days                  = 30
+  terraform_managed_diagnostic_settings_enabled = true
   tags = {
     Project     = "tftest"
     Environment = "ci"

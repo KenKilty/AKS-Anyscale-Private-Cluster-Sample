@@ -25,11 +25,10 @@ locals {
 }
 
 resource "azurerm_private_dns_zone_virtual_network_link" "this" {
-  for_each              = local.zone_vnet_links
-  name                  = "link-${each.value.zone_key}-${each.value.link_key}"
-  resource_group_name   = var.resource_group_name
-  private_dns_zone_name = azurerm_private_dns_zone.this[each.value.zone_key].name
-  virtual_network_id    = each.value.vnet_id
-  registration_enabled  = false
-  tags                  = var.tags
+  for_each             = local.zone_vnet_links
+  name                 = "link-${each.value.zone_key}-${each.value.link_key}"
+  private_dns_zone_id  = azurerm_private_dns_zone.this[each.value.zone_key].id
+  virtual_network_id   = each.value.vnet_id
+  registration_enabled = false
+  tags                 = var.tags
 }

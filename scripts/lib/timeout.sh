@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 # Shared timeout wrapper for long-running local commands.
-# Prefer run_with_timeout instead of hand-written wait loops in callers.
-# This file is pure Bash so it works without Perl, GNU timeout, or gtimeout.
+#
+# Purpose: bound external commands without Perl, GNU timeout, or gtimeout.
+#          Prefer run_with_timeout over hand-written wait loops.
+# Usage:   sourced; do not execute.
+# Inputs:  run_with_timeout <seconds> <command...>; optional
+#          RUN_WITH_TIMEOUT_KILL_AFTER_SECONDS (default 5).
+# Outputs: the command's own streams; returns its exit code, or 124 on timeout.
 
 format_timeout_command_display() {
   local result_var="$1"

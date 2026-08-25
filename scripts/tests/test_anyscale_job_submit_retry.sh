@@ -1,4 +1,12 @@
 #!/usr/bin/env bash
+# Offline unit test for the Anyscale job-submission retry policy.
+#
+# Purpose: assert that should_retry_anyscale_job_submission retries only the
+#          transient image-build and HTTP 500 failures, and only on attempt 1.
+# Usage:   ./scripts/tests/test_anyscale_job_submit_retry.sh
+#          No cloud access or credentials required.
+# Inputs:  none; the test writes its own fixture logs to a temp directory.
+# Outputs: a pass line on stdout; non-zero exit on the first failed assertion.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

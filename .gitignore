@@ -38,6 +38,7 @@ tfplan.*
 .mcp.json
 .playwright-mcp/
 .vscode/*
+!.vscode/mcp.json
 .venv/
 
 # Local AI agent skill bundles
@@ -49,6 +50,7 @@ tfplan.*
 .cache/
 tmp/
 *.pdf
+/RESULTS.md
 
 # Local working notes
 /ISSUES.md
@@ -60,6 +62,8 @@ tmp/
 /ANYSCALE-DELETION-SUPPORT-REQUEST.md
 /E2E-VALIDATION-LOG.md
 /TEARDOWN-OBSERVATIONS.md
+/PRIVATE-LINK-PLAN.md
+/LABTEST.md
 
 # Misc
 /tmp

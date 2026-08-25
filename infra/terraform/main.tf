@@ -57,8 +57,7 @@ resource "azurerm_private_dns_a_record" "anyscale_userdata" {
   for_each = toset(["i", "s"])
 
   name                = "*"
-  zone_name           = module.dns.zone_names["anyscale_userdata_${each.key}"]
-  resource_group_name = local.resource_group_name
+  private_dns_zone_id = module.dns.zone_ids["anyscale_userdata_${each.key}"]
   ttl                 = 300
   records             = [local.gateway_internal_lb_ip]
 }
@@ -87,6 +86,12 @@ module "dns_resolver" {
   forwarding_ruleset_vnet_links = {
     workload = local.net_vnet_id
   }
+
+  # The resolver attaches to the VNet, and Azure rejects the attach while the
+  # VNet is mid-update ("Virtual network in NRP is not in the succeeded
+  # provisioning state"). Setting the VNet DNS servers is such an update, so
+  # order behind it the same way routing, bastion, jump_host, and aks do.
+  depends_on = [azurerm_virtual_network_dns_servers.workload]
 }
 
 ###############################################################################
@@ -156,6 +161,8 @@ module "identity" {
   operator_identity     = var.anyscale_operator_identity
   storage_data_scope_id = module.storage.container_id
   tags                  = var.tags
+
+  depends_on = [module.storage]
 }
 
 ###############################################################################
@@ -177,12 +184,19 @@ module "firewall" {
 
   firewall_subnet_id = local.net_subnet_ids.firewall
 
-  aks_nodes_cidr           = var.subnet_cidrs.aks_nodes
-  anyscale_fqdns           = var.anyscale_fqdns
+  aks_nodes_cidr = var.subnet_cidrs.aks_nodes
+  # Filtered in privatelink.tf: when enable_privatelink is true, FQDNs under the
+  # Anyscale private DNS zone are dropped because they resolve in-VNet and can
+  # never match an outbound firewall rule. Identical to var.anyscale_fqdns /
+  # var.anyscale_jump_host_fqdns otherwise.
+  anyscale_fqdns           = local.firewall_anyscale_fqdns
+  anyscale_jump_host_fqdns = local.firewall_anyscale_jump_host_fqdns
   azure_identity_fqdns     = var.azure_identity_fqdns
+  azure_portal_fqdns       = var.azure_portal_fqdns
   azure_monitor_fqdns      = var.azure_monitor_fqdns
   container_registry_fqdns = var.container_registry_fqdns
-  jump_host_cidrs          = [var.subnet_cidrs.jump_host]
+  jump_host_cidrs          = [var.subnet_cidrs.jump_host, var.subnet_cidrs.browser_jump_host]
+  browser_jump_host_cidrs  = var.enable_browser_host ? [var.subnet_cidrs.browser_jump_host] : []
   tool_bootstrap_fqdns     = var.tool_bootstrap_fqdns
   dns_proxy_enabled        = true
   dns_servers              = []
@@ -211,8 +225,9 @@ module "routing" {
   firewall_private_ip = local.net_firewall_private_ip
 
   subnet_ids_to_associate = {
-    aks_nodes = local.net_subnet_ids.aks_nodes
-    jump_host = local.net_subnet_ids.jump_host
+    aks_nodes         = local.net_subnet_ids.aks_nodes
+    jump_host         = local.net_subnet_ids.jump_host
+    browser_jump_host = local.net_subnet_ids.browser_jump_host
   }
 
   depends_on = [azurerm_virtual_network_dns_servers.workload]
@@ -235,6 +250,14 @@ module "acr" {
   zone_redundancy_enabled     = var.acr_zone_redundancy_enabled
   log_analytics_workspace_id  = module.observability.log_analytics_workspace_id
   diagnostic_settings_enabled = var.terraform_managed_diagnostic_settings_enabled
+}
+
+resource "azurerm_role_assignment" "acr_push" {
+  for_each = var.acr_push_principal_ids
+
+  scope                = module.acr.acr_id
+  role_definition_name = "AcrPush"
+  principal_id         = each.value
 }
 
 ###############################################################################
@@ -290,7 +313,7 @@ module "browser_jump_host" {
   subnet_id      = local.net_subnet_ids.browser_jump_host
   vm_size        = var.windows_browser_jump_host_vm_size
   admin_username = var.windows_browser_jump_host_admin_username
-  admin_password = var.windows_browser_jump_host_admin_password
+  admin_password = local.browser_host_admin_password
 
   vm_user_login_principal_ids  = var.browser_host_vm_user_login_principal_ids
   vm_admin_login_principal_ids = var.browser_host_vm_admin_login_principal_ids
@@ -416,10 +439,87 @@ module "keyvault" {
   purge_protection_enabled   = var.key_vault_purge_protection_enabled
   soft_delete_retention_days = var.key_vault_soft_delete_retention_days
 
+  public_network_access_enabled = var.key_vault_public_network_access_enabled
+  public_network_access_ip_rules = toset([
+    for cidr in split(",", var.key_vault_public_access_cidrs_csv) : trimspace(cidr)
+    if trimspace(cidr) != ""
+  ])
+
+}
+
+# Effective Windows browser-host local-admin password. When an explicit override
+# is supplied (the current ignored .env path), it is used unchanged so the
+# deployed VM is never rotated. When enabled with no override, a strong,
+# Windows-compatible password is generated with a shell-safe special-character
+# set (no $, backtick, quotes, or other ambiguous/fragile characters).
+resource "random_password" "browser_host_admin" {
+  count = var.enable_browser_host && var.windows_browser_jump_host_admin_password == "" ? 1 : 0
+
+  length           = 24
+  min_lower        = 2
+  min_upper        = 2
+  min_numeric      = 2
+  min_special      = 2
+  override_special = "!@#%*-_=+"
+}
+
+locals {
+  browser_host_admin_password      = var.windows_browser_jump_host_admin_password != "" ? var.windows_browser_jump_host_admin_password : try(random_password.browser_host_admin[0].result, "")
+  browser_jump_host_admin_username = var.enable_browser_host ? var.windows_browser_jump_host_admin_username : null
+  browser_jump_host_password_secret = {
+    enabled                = var.enable_browser_host
+    secret_name            = var.enable_browser_host ? var.browser_host_admin_password_secret_name : null
+    secret_id              = var.enable_browser_host ? "${module.keyvault.key_vault_id}/secrets/${var.browser_host_admin_password_secret_name}" : null
+    reader_principal_count = var.enable_browser_host ? length(var.browser_host_admin_password_secret_reader_principal_ids) : 0
+    reader_scope           = var.enable_browser_host && length(var.browser_host_admin_password_secret_reader_principal_ids) > 0 ? module.keyvault.key_vault_id : null
+    password_generated     = var.enable_browser_host && nonsensitive(var.windows_browser_jump_host_admin_password == "")
+  }
+}
+
+# Fallback local-admin password for the Windows browser host, stored in the
+# RBAC-authorized Key Vault. Entra ID login remains the preferred sign-in path;
+# this secret only backstops break-glass RDP.
+resource "azapi_resource_action" "browser_host_admin_password" {
+  count = var.enable_browser_host ? 1 : 0
+
+  type        = "Microsoft.KeyVault/vaults@2025-05-01"
+  resource_id = module.keyvault.key_vault_id
+  action      = "secrets/${var.browser_host_admin_password_secret_name}"
+  method      = "PUT"
+  when        = "apply"
+
+  body = {
+    properties = {
+      value = local.browser_host_admin_password
+    }
+  }
+
+  depends_on = [module.keyvault]
+}
+
+# Key Vault Secrets User grants value access. Key Vault Reader separately grants
+# the vault/object metadata listing used by Azure portal picker experiences.
+# Only explicit browser-host password reader principals receive either role.
+resource "azurerm_role_assignment" "browser_host_admin_password_reader" {
+  for_each = var.enable_browser_host ? var.browser_host_admin_password_secret_reader_principal_ids : {}
+
+  scope                = module.keyvault.key_vault_id
+  role_definition_name = "Key Vault Secrets User"
+  principal_id         = each.value
+}
+
+resource "azurerm_role_assignment" "browser_host_admin_password_metadata_reader" {
+  for_each = var.enable_browser_host ? var.browser_host_admin_password_secret_reader_principal_ids : {}
+
+  scope                = module.keyvault.key_vault_id
+  role_definition_name = "Key Vault Reader"
+  principal_id         = each.value
 }
 
 module "image_integrity" {
   source = "./modules/image_integrity"
+
+  enabled = var.enable_image_integrity
 
   resource_group_name = local.resource_group_name
   resource_group_id   = local.resource_group_id
@@ -457,6 +557,8 @@ resource "azurerm_role_assignment" "jump_host_kv_secrets_user" {
 
 # Ratify reads the signing certificate chain to verify signatures.
 resource "azurerm_role_assignment" "ratify_kv_secrets_user" {
+  count = var.enable_image_integrity ? 1 : 0
+
   scope                            = module.keyvault.key_vault_id
   role_definition_name             = "Key Vault Secrets User"
   principal_id                     = module.image_integrity.ratify_principal_id
@@ -466,6 +568,8 @@ resource "azurerm_role_assignment" "ratify_kv_secrets_user" {
 
 # Ratify reads images and Notation signature referrers from the private ACR.
 resource "azurerm_role_assignment" "ratify_acr_pull" {
+  count = var.enable_image_integrity ? 1 : 0
+
   scope                            = module.acr.acr_id
   role_definition_name             = "AcrPull"
   principal_id                     = module.image_integrity.ratify_principal_id

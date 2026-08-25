@@ -1,227 +1,225 @@
 # Module 3: Deploy and Prove the Lab Workload
 
-> **Difficulty:** Advanced | **Roles:** Platform Engineer, DevOps Engineer | **Time:** 60–90 min
+## Purpose
 
-By the end of this module, you're able to:
+Deploy the private AKS cluster, private ACR, storage, observability resources,
+Anyscale platform resources, CPU and GPU compute configurations, and durable CPU
+and GPU workspaces. Validate Azure resource state, in-cluster components,
+workspace state, and deterministic workload proof markers.
 
-- Deploy a private AKS cluster and the Anyscale on Azure control plane from inside the VNet.
-- Verify the deployment with static Terraform checks and live readiness checks.
-- Run deterministic CPU, GPU, build, train, and serve proofs and read their success markers.
-- Understand why custom images are required in a private data plane (the full walk-through is [Module 4](module-4-custom-image.md)).
-
-Once this module completes, your lab resource group contains a private AKS cluster with
-system, CPU, and GPU node pools; a private ACR (the custom image is built in Module 4); the
-Anyscale cloud ARM resource and AKS extension; and the durable workspaces `aks-cpu-workspace`
-and `aks-gpu-workspace` in `RUNNING` state — all confirmed by passing proof markers.
-
-## What You Will Build
-
-- Workload resources added to the lab resource group
-  (`rg-<project>-<environment>-<region_short>`).
-- A **private AKS** cluster with system, CPU, and GPU pools.
-- A **private ACR** with Private Link.
-- Storage, observability, workload identity, and platform identities.
-- The Anyscale **cloud** ARM resource and AKS extension.
-- CPU and GPU compute configs and durable workspaces.
-
-The lab workload lives in `infra/terraform` with the foundation resources.
-
-## Why This Matters
-
-This is the real Anyscale-on-private-AKS scenario. The module proves the sample
-works **without** giving a laptop private network reach. [Module 4](module-4-custom-image.md)
-builds on it to show why custom images matter: in a locked-down private data
-plane, runtime package download is blocked, so dependencies must be baked into an
-image pushed to your private registry.
-
-The deploy runs **from your workstation**: all Terraform is Azure control-plane
-only (ARM/AzAPI) and uses **local state** on your machine. The in-cluster
-bootstrap (operator namespace and service account, the NVIDIA device plugin, and
-the Anyscale gateway) runs **on the Linux jump host** as idempotent kubectl/helm
-steps via `scripts/bootstrap-k8s.sh`, invoked over a Bastion tunnel — **Terraform
-never runs on the jump box**. The AKS cluster also applies the current hardening
-baseline by default: local cluster admin accounts are disabled, Microsoft
-Defender for Containers is enabled, the Key Vault Secrets Provider add-on is
-enabled, the bootstrap path labels the operator and GPU namespaces with Pod
-Security Admission baseline controls, the bootstrap path applies a
-conservative NetworkPolicy baseline that denies ingress by default while
-preserving same-namespace and DNS traffic, and the bootstrap path applies
-resource guardrails so the namespaces have sensible default requests/limits and
-aggregate quotas. Use Entra-backed access for day-to-day operations; opt out
-only for a temporary break-glass exception.
+Terraform runs from the workstation and uses local state in `infra/terraform`.
+The deployment invokes `kubectl` and Helm on the Linux jump host through
+Bastion for private data plane bootstrap. Terraform never runs on the Linux
+jump host.
 
 ## Prerequisites
 
-- Module 1 applied and Module 2 verified (the jump host is reachable over Bastion
-  and has `kubectl` and `helm`).
-- You run `module 3` commands **from your workstation**, not the jump host.
-- Anyscale CLI auth is available
-  (`ANYSCALE_HOST=https://console.azure.anyscale.com anyscale login`).
+- Module 1 is applied and Module 2 validation passes.
+- The workstation can authenticate to Azure and reach `management.azure.com`.
+- The Linux jump host is synchronized, bootstrapped, and reachable through
+  Bastion.
+- Anyscale CLI authentication is available. For interactive OAuth:
 
-## Exercise 1: Deploy
+  ```bash
+  ANYSCALE_HOST=https://console.azure.anyscale.com .venv/bin/anyscale login
+  ```
 
-### Review the nine deploy stages
+- Any enabled Anyscale control-plane Private Link endpoint is approved, and its
+  private DNS and operator control-plane URL are configured.
+- The target subscription has quota for the configured system and CPU VM sizes.
+  The default GPU pool uses `Standard_NC16as_T4_v3`; verify that SKU in the
+  target region and request the corresponding NC-family vCPU quota before
+  deployment. For a CPU-only lab, set `TF_VAR_gpu_pool_configs='{}'` in `.env`.
 
-`module 3 deploy` runs nine sequential stages. Each writes its own log under
-`.cache/aks-anyscale-sample-harness/runs/<timestamp>-deploy/`. The
-`bootstrap-a`/`bootstrap-b` stages are the only ones that touch the jump host, and they
-run `kubectl`/`helm` over a Bastion tunnel — **Terraform never runs on the jump box**.
+## Configuration
 
-| Stage | What it does |
-| --- | --- |
-| `prepare` | Renders `terraform.auto.tfvars.json` from `.env` and validates required inputs. |
-| `reset-or-state` | Reconciles existing Terraform state, or resets it with `--from-scratch`. |
-| `terraform-init-validate` | Runs `terraform init`, `fmt -check`, and `validate` on the rendered config. |
-| `foundation` | Applies the Azure foundation: VNet, Firewall, Bastion, AKS, ACR, storage, observability. |
-| `bootstrap-a` | Jump-host `kubectl`/`helm`: namespaces, workload identity, NVIDIA device plugin. |
-| `platform` | Applies the Anyscale cloud ARM resource and AKS extension from your workstation. |
-| `bootstrap-b` | Jump-host `kubectl`/`helm`: installs the Anyscale gateway and finishes TLS bootstrap. |
-| `workspaces` | Creates or reconciles the `aks-cpu` and `aks-gpu` durable workspaces. |
-| `health` | Confirms AKS, the extension, the cloud, operator/Istio/gateway rollout, and workspace state. |
+For a first run, keep the hardening, storage, registry, observability, operator,
+and Gateway values supplied by `.env-template`. Decide only:
 
-### Run the deploy
+| Decision | Input | Guidance |
+| --- | --- | --- |
+| CPU or CPU+GPU | `TF_VAR_gpu_pool_configs` | Keep the T4 map only when the region has SKU availability and quota; use `{}` for CPU-only. |
+| Platform access | `TF_VAR_anyscale_platform_default_admin_assignment`, `TF_VAR_anyscale_platform_role_assignments` | The template grants the deploying principal the platform administrator role at subscription scope. Add only reviewed Entra object IDs. |
+| Image Integrity | `TF_VAR_enable_image_integrity` | Keep enabled only when you plan to complete Module 5 and can create policy assignments. Modules 1-4 do not require it. |
+| Control-plane Private Link | `TF_VAR_enable_privatelink`, `TF_VAR_anyscale_privatelink_service_alias`, `TF_VAR_anyscale_platform` | Optional. Anyscale must provide the service alias and approve the Azure private endpoint. Use the two-pass procedure below. |
+
+Leave `ANYSCALE_CLOUD_NAME` and `ANYSCALE_CLOUD_DEPLOYMENT_ID` empty before the
+first deployment. The harness derives the cloud name and writes both values to
+the ignored `.env` after Azure creates the Anyscale cloud resource.
+
+See [Configuration Reference](../configuration-reference.md) before changing
+AKS versions, upgrade channels, security controls, node pools, storage,
+firewall egress, or observability.
+
+## Procedure
+
+Unless a step explicitly says Linux jump host, launch commands from the
+workstation.
+
+### Deploy from the Workstation
+
+> **Stop:** On first deployment, the harness can prompt you to review and accept
+> the Anyscale AKS Operator Marketplace terms. Do not continue if you are not
+> authorized to accept subscription-scoped terms; ask a subscription
+> administrator to accept them.
 
 ```bash
 ./scripts/anyscale-aks.sh module 3 deploy
 ```
 
-All Terraform is Azure control-plane only (ARM/AzAPI) and uses **local state** on your
-workstation. The in-cluster bootstrap runs on the jump host in two phases, with the
-Anyscale cloud and AKS extension applied from your workstation in between.
+Expect the command to validate inputs, apply Azure infrastructure, bootstrap
+private AKS access through the Linux jump host, register the Anyscale platform,
+create workspaces, and run health checks. Maintainers can find the nine-stage
+breakdown in [Maintainer Workflows](../maintainer-workflows.md#deploy-stage-reference).
 
-The run streams each stage and ends with the health summary (`<n>s` is the measured
-stage duration):
+> **Note:** Azure provisioning commonly takes tens of minutes. Follow the stage
+> log path printed by the harness and do not interrupt an active Terraform or
+> Azure operation.
 
-```output
-[setup] [1/9] prepare started
-[setup] [1/9] prepare ok (<n>s)
-[setup] [4/9] foundation started
-[setup] [4/9] foundation ok (<n>s)
-[setup] [9/9] health started
-[setup] Azure AKS cluster aks-<project>-<env>-<region> is Succeeded/Running.
-[setup] Anyscale AKS extension anyscale-operator provisioningState=Succeeded.
-[setup] Anyscale cloud resource provisioningState=Succeeded.
-[setup] Anyscale operator, app-routing Istio control plane, and Anyscale Gateway are Available.
-[setup] CPU workspace aks-cpu-workspace API status=RUNNING.
-[setup] GPU workspace aks-gpu-workspace API status=RUNNING.
-[setup] [9/9] health ok (<n>s)
-[setup] Deployment complete. Run ./scripts/anyscale-aks.sh verify --full, then ./scripts/anyscale-aks.sh proof all.
-```
+If Private Link is enabled, make the first deploy with
+`operator_control_plane_url = null` in `TF_VAR_anyscale_platform`. This creates
+the private endpoint while the operator continues to use the public control
+plane URL. After the endpoint appears as pending:
 
-## Exercise 2: Verify
+1. Ask Anyscale to approve the cross-tenant private endpoint.
+2. Wait until Azure reports the connection as approved.
+3. Set `operator_control_plane_url` to
+  `https://cld-${ANYSCALE_CLOUD_DEPLOYMENT_ID}.${TF_VAR_anyscale_private_dns_zone_name}`.
+4. Rerun `./scripts/anyscale-aks.sh module 3 deploy` from the workstation.
+5. Run the [Private Link DNS proof](browser-access.md#private-link-dns-proof),
+   test HTTPS from inside the VNet, and continue only when both checks pass.
+
+> **Warning:** Do not set the private operator URL before Anyscale approves the
+> endpoint. The in-cluster operator cannot reach an unapproved endpoint.
+
+### Verify from the Workstation
 
 ```bash
 ./scripts/anyscale-aks.sh module 3 verify --full
 ```
 
-Runs both static Terraform validation and live infrastructure/readiness checks
-from inside the VNet.
+This runs static Terraform checks and live infrastructure and readiness checks.
+Private cluster checks are delegated through the Linux jump host.
 
-## Module 4: Custom images
+### Run Private Proofs on the Linux Jump Host
 
-The custom-image steps (prove-failure, preflight, prepare, apply, proof) are their
-own module. Continue to [Module 4: Custom Images for a Private Data
-Plane](module-4-custom-image.md) after this module's proofs pass.
+The complete proof pipeline uploads Anyscale working directories to private
+storage and accesses private data plane endpoints. Run it from the synchronized
+repository on the Linux jump host.
 
-## Exercise 3: Run the workload proofs
-
-Run the full proof from the Linux jump host after Module 2 is synced and
-bootstrapped. The CPU/GPU Ray probes can be inspected from either side, but the
-Anyscale build, train, and serve proofs upload a working directory to private
-storage and are meant to execute from inside the VNet.
+> **Note:** If the workstation files or `.env` changed after Module 2, rerun
+> `module 2 sync` on the workstation first. Reconnect to the Linux jump host and
+> repeat the Module 2 Anyscale login step if its cached credentials are
+> unavailable.
 
 ```bash
+cd /opt/anyscale-aks-sample
 ./scripts/anyscale-aks.sh module 3 proof all
 ```
 
-Each proof prints a deterministic JSON payload followed by its success marker. A full
-run emits the CPU and GPU Ray markers, the build and train job markers, and the serve
-service marker:
+The CPU and GPU Ray checks execute in their durable workspaces. The build and
+train proofs execute as Anyscale jobs, and the Serve proof executes as an
+Anyscale service. GPU stages can wait for node-pool scaling, image pulls, and
+NVIDIA device-plugin readiness.
 
-```output
-{"marker": "CPU_RAY_PROOF_OK", "row_count": 16, "square_sum": 1240}
-CPU_RAY_PROOF_OK
-[setup] aks-cpu-workspace printed CPU_RAY_PROOF_OK.
-{"cube_sum": 784, "gpu_capacity": 1.0, "marker": "GPU_RAY_PROOF_OK", "row_count": 8}
-GPU_RAY_PROOF_OK
-[setup] aks-gpu-workspace printed GPU_RAY_PROOF_OK.
-CPU_BUILD_JOB_PROOF_OK
-GPU_TRAIN_JOB_PROOF_OK
-service_state=STARTING primary_version_state=RUNNING
-GPU_SERVE_SERVICE_PROOF_OK
-```
+### Validate in the Windows Browser Jump Host
 
-On a cold GPU pool, the train and serve stages can spend several minutes in
-startup while AKS scales the T4 node pool, pulls images, and initializes the
-NVIDIA device plugin. For services, the Anyscale top-level service state can
-briefly lag the running version and endpoint: the harness treats a running
-primary version plus successful endpoint proof as the meaningful readiness
-signal.
-
-## Validate Your Work
-
-- Deploy stages pass from the VM.
-- `verify --full` passes static and live validation.
-- The CPU, GPU, build-job, train-job, and serve proof stages pass.
-
-As you observe these stages, notice the Anyscale differentiators at work:
-managed workspaces and fast cluster launch (deploy), intelligent autoscaling
-(job startup), and workload observability (proof review).
-
-## Exercise 4 (optional): Browser validation before teardown
-
-Console-launched workspace, dashboard, and service URLs are private. To inspect
-them in a browser, use the Windows browser jump host:
+Launch the browser instructions and infrastructure precheck from the
+workstation:
 
 ```bash
 ./scripts/anyscale-aks.sh module 3 browser validate
 ```
 
-See [browser-access.md](browser-access.md) for the full lesson. Browser
-validation is **not** part of the default unattended run.
+Connect to the Windows browser jump host through Azure portal Bastion RDP, open
+`https://console.azure.anyscale.com`, and launch a workspace or service. Confirm
+that workspace, Ray dashboard, VS Code, and service URLs resolve privately with
+valid TLS. Browser validation is interactive and is not part of the unattended
+run. See [Browser Access](browser-access.md).
 
-## Unattended Equivalence
+## Validation
 
-The step-by-step path above is exactly what the unattended command runs:
+The deployment is valid when:
+
+- All nine deploy stages complete successfully.
+- AKS, the Anyscale AKS extension, and the Anyscale cloud resource report
+  `Succeeded`.
+- The Anyscale operator, Istio control plane, and Anyscale gateway report
+  available or running state.
+- The CPU and, when configured, GPU durable workspaces report `RUNNING`.
+- `module 3 verify --full` passes.
+- The private proof run emits these proof markers:
+
+  - `CPU_RAY_PROOF_OK`
+  - `CPU_BUILD_JOB_PROOF_OK`
+
+  With a GPU pool configured, the run also emits:
+
+  - `GPU_RAY_PROOF_OK`
+  - `GPU_TRAIN_JOB_PROOF_OK`
+  - `GPU_SERVE_SERVICE_PROOF_OK`
+
+The canonical proof marker list and evidence format are in
+[Proof Markers](../proof-markers.md).
+
+## Adapt the Lab
+
+Change supported deployment inputs in `.env`, review a new Terraform plan, and
+rerun verification. Source ownership and required checks are listed under
+[Configuration Reference: Modification Points](../configuration-reference.md#modification-points).
+
+## Troubleshooting
+
+- If `bootstrap-a` or `bootstrap-b` fails, verify Module 2 on the Linux jump
+  host, confirm `kubectl` and Helm are installed, and confirm the managed
+  identity is present in the configured AKS admin principal map.
+- If Terraform init, validation, plan, or apply fails, troubleshoot from the
+  workstation. Confirm Azure CLI authentication and access to
+  `management.azure.com`; do not move Terraform to the Linux jump host.
+- If a proof upload fails from the workstation, run `module 3 proof all` from
+  `/opt/anyscale-aks-sample` on the Linux jump host. Private Blob and DFS
+  endpoints resolve and route inside the VNet.
+- If the Anyscale operator cannot reach its control plane with Private Link,
+  confirm endpoint approval, private DNS resolution, and
+  `anyscale_platform.operator_control_plane_url` in
+  `TF_VAR_anyscale_platform`.
+- If GPU proofs remain in startup, inspect GPU node-pool scaling, image pulls,
+  and NVIDIA device-plugin readiness. Treat the proof marker, not an
+  intermediate `STARTING` state, as completion.
+- If browser URLs fail, run the Windows browser jump host verification and
+  follow the DNS and TLS checks in [Browser Access](browser-access.md).
+
+### Unattended Run and Teardown
+
+Launch the unattended workflow from the workstation:
 
 ```bash
 ./scripts/anyscale-aks.sh e2e --mode jump-host --custom-image --teardown
 ```
 
-To also run the non-interactive browser-host prerequisite checks (without portal
-RDP or interactive login):
+Include the non-interactive Windows browser jump host prerequisite checks with:
 
 ```bash
 ./scripts/anyscale-aks.sh e2e --mode jump-host --custom-image --include-browser-precheck
 ```
 
-When `--teardown` is supplied, the e2e summary states that interactive browser
-validation was skipped and points you to `module 3 browser validate`.
+The browser precheck does not perform portal RDP or interactive browser
+validation. Run `module 3 browser validate` before teardown when that evidence
+is required.
 
-## Troubleshooting
+To remove the workload separately, launch this command from the workstation:
 
-- **`bootstrap-a`/`bootstrap-b` fails** — these run `kubectl`/`helm` on the jump
-  host over a Bastion tunnel; confirm Module 2 installed `kubectl`/`helm` and the
-  jump-host managed identity has cluster-admin (granted via the explicit
-  principal map in shared mode).
-- **Terraform init/apply fails on the workstation** — the lab uses
-  **local state** and Azure control-plane (ARM/AzAPI) only; confirm your `az`
-  login can reach `management.azure.com`.
-- **Job proof upload fails from the workstation** — rerun the proof from the
-  Linux jump host. In the private lab, Anyscale working directories are uploaded
-  to private Storage Blob/DFS endpoints that resolve and route only inside the
-  VNet.
-- **GPU train or serve appears slow** — check whether the GPU node pool is
-  scaling from zero or pulling images. This is expected on a cold run; wait for
-  the proof marker before treating `STARTING` as a failure.
+```bash
+./scripts/anyscale-aks.sh module 3 teardown
+```
 
-## Summary
+> **Warning:** Both `--teardown` and `module 3 teardown` delete real Azure and
+> Anyscale resources. Review the [Clean Up](cleanup.md) procedure and confirm
+> the intended scope before continuing.
 
-You deployed and proved the private Anyscale-on-AKS lab workload by running the
-Azure control-plane Terraform from your workstation and the in-cluster bootstrap
-as `kubectl`/`helm` scripts on the jump host. [Module 4](module-4-custom-image.md)
-builds on this by demonstrating the custom-image requirement.
+## Next Step
 
-## Next unit
-
-Continue to [Module 4: Custom Images for a Private Data Plane](module-4-custom-image.md).
+Continue to
+[Module 4: Custom Images for a Private Data Plane](module-4-custom-image.md).
+When the lab is no longer required, follow [Clean Up](cleanup.md); teardown
+removes real Azure resources.

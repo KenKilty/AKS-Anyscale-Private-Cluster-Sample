@@ -179,7 +179,11 @@
         "isHnsEnabled": true,
         "minimumTlsVersion": "TLS1_2",
         "defaultToOAuthAuthentication": true,
-        "allowSharedKeyAccess": false
+        "allowSharedKeyAccess": false,
+        "publicNetworkAccess": "Disabled",
+        "networkAcls": {
+          "defaultAction": "Deny"
+        }
       },
       "tags": "[union(if(contains(parameters('tagsByResource'), 'Microsoft.Storage/storageAccounts'), parameters('tagsByResource')['Microsoft.Storage/storageAccounts'], json('{}')), createObject('anyscale-cloud', parameters('cloudName')))]"
     },
@@ -361,7 +365,7 @@
     },
     {
       "type": "Anyscale.Platform/clouds",
-      "apiVersion": "2026-02-01-preview",
+      "apiVersion": "${anyscale_platform_arm_api_version}",
       "name": "[parameters('cloudName')]",
       "location": "[parameters('location')]",
       "dependsOn": [
@@ -374,7 +378,7 @@
     },
     {
       "type": "Anyscale.Platform/clouds/cloudResources",
-      "apiVersion": "2026-02-01-preview",
+      "apiVersion": "${anyscale_platform_arm_api_version}",
       "name": "[concat(parameters('cloudName'), '/default')]",
       "location": "[parameters('location')]",
       "dependsOn": [
@@ -395,7 +399,7 @@
   "outputs": {
     "cloudResourceId": {
       "type": "string",
-      "value": "[reference(resourceId('Anyscale.Platform/clouds/cloudResources', parameters('cloudName'), 'default'), '2026-02-01-preview').cloudResourceId]"
+      "value": "[reference(resourceId('Anyscale.Platform/clouds/cloudResources', parameters('cloudName'), 'default'), '${anyscale_platform_arm_api_version}').cloudResourceId]"
     },
     "storageAccountName": {
       "type": "string",

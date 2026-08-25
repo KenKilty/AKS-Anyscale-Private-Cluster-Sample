@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+"""Prove Ray GPU scheduling in the durable GPU workspace.
+
+Emits GPU_RAY_PROOF_OK only when a GPU is visible and the deterministic
+cube-sum result matches.
+"""
+
 import json
 import os
 from typing import Any

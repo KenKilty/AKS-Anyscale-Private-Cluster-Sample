@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1500" height="900" viewBox="0 0 1500 900" role="img" aria-labelledby="title desc">
   <title id="title">Anyscale private AKS reference architecture on Azure</title>
-  <desc id="desc">Three-module private Anyscale on Azure AKS lab diagram: durable foundation with Bastion and Linux/Windows jump hosts, AKS data plane, Gateway data plane, dependencies, controlled egress, workload proof, teardown, and managed services.</desc>
+  <desc id="desc">Five-module private Anyscale on Azure AKS lab diagram: workstation-owned Terraform, private jump-host access, AKS and Gateway data planes, private dependencies, controlled egress, workload proofs, image-signature audit, teardown, and managed services.</desc>
   <defs>
     <marker id="arrow-blue" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#2563EB"/>
@@ -35,22 +35,23 @@
 
   <rect width="1500" height="900" fill="#FFFFFF"/>
   <text x="40" y="58" class="title">Anyscale private AKS reference architecture on Azure</text>
-  <text x="40" y="92" class="subtitle">Three-module lab: build the durable foundation (network, Bastion, jump hosts, local state), prepare the in-VNet operator host, then deploy, prove, and tear down the lab workload.</text>
+  <text x="40" y="88" class="subtitle">C4 container view. Build the foundation and in-VNet operator path; deploy and prove the Anyscale workload;</text>
+  <text x="40" y="108" class="subtitle">build and sign a custom image; audit image signatures; then clean up. Detailed views: docs/diagrams 02-05.</text>
 
   <rect x="250" y="140" width="1080" height="680" rx="10" fill="#FFFFFF" stroke="#94A3B8" stroke-width="2" stroke-dasharray="8 4"/>
   <text x="270" y="174" class="section">Azure resource group and private virtual network</text>
 
   <rect x="40" y="390" width="180" height="110" rx="10" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="2"/>
   <text x="130" y="423" text-anchor="middle" class="box-title">Operator workstation</text>
-  <text x="130" y="451" text-anchor="middle" class="box-text">az login, Bastion to host</text>
-  <text x="130" y="473" text-anchor="middle" class="box-text">module 1 / 2 / 3</text>
+  <text x="130" y="451" text-anchor="middle" class="box-text">Terraform + Azure CLI</text>
+  <text x="130" y="473" text-anchor="middle" class="box-text">foundation, deploy, teardown</text>
 
   <rect x="300" y="360" width="200" height="150" rx="10" fill="#EFF6FF" stroke="#2563EB" stroke-width="2"/>
-  <text x="400" y="394" text-anchor="middle" class="box-title">Foundation (durable)</text>
+  <text x="400" y="394" text-anchor="middle" class="box-title">Private operator access</text>
   <text x="400" y="420" text-anchor="middle" class="box-text">Bastion + Linux jump host</text>
-  <text x="400" y="442" text-anchor="middle" class="box-text">managed-identity auth</text>
-  <text x="400" y="464" text-anchor="middle" class="box-text">Optional Windows browser VM</text>
-  <text x="400" y="486" text-anchor="middle" class="box-text">Local Terraform state</text>
+  <text x="400" y="442" text-anchor="middle" class="box-text">managed-identity authentication</text>
+  <text x="400" y="464" text-anchor="middle" class="box-text">Optional Windows browser</text>
+  <text x="400" y="486" text-anchor="middle" class="box-text">jump host</text>
 
   <rect x="560" y="210" width="250" height="150" rx="10" fill="#FFFFFF" stroke="#2563EB" stroke-width="2"/>
   <text x="685" y="249" text-anchor="middle" class="box-title">Private AKS data plane</text>
@@ -71,9 +72,9 @@
 
   <rect x="880" y="210" width="240" height="150" rx="10" fill="#FFFFFF" stroke="#10B981" stroke-width="2"/>
   <text x="1000" y="249" text-anchor="middle" class="box-title">Private dependencies</text>
-  <text x="1000" y="279" text-anchor="middle" class="box-text">ADLS Gen2, ACR, Private Link</text>
-  <text x="1000" y="303" text-anchor="middle" class="box-text">Workload Identity</text>
-  <text x="1000" y="327" text-anchor="middle" class="box-text">and RBAC</text>
+  <text x="1000" y="279" text-anchor="middle" class="box-text">ADLS Gen2, ACR, Key Vault</text>
+  <text x="1000" y="303" text-anchor="middle" class="box-text">private endpoints</text>
+  <text x="1000" y="327" text-anchor="middle" class="box-text">Workload Identity and RBAC</text>
 
   <rect x="880" y="420" width="240" height="150" rx="10" fill="#FFF7ED" stroke="#F59E0B" stroke-width="2"/>
   <text x="1000" y="459" text-anchor="middle" class="box-title">Controlled egress</text>
@@ -133,6 +134,6 @@
   <path d="M 1120 705 L 1155 705 L 1155 650 L 1190 650" fill="none" stroke="#EF4444" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#arrow-red)"/>
   <text x="1128" y="690" class="edge-label" fill="#991B1B">drain first</text>
 
-  <text x="40" y="842" class="small">The foundation is durable across workload rebuilds; module 3 teardown destroys only the lab workload. The Linux jump host runs Terraform, kubectl, Helm, Podman, and the Anyscale CLI with</text>
-  <text x="40" y="862" class="small">managed-identity auth and direct private AKS access. Cloud teardown drains workspaces and services before deleting the cloud.</text>
+  <text x="40" y="842" class="small">Terraform runs on the operator workstation. The Linux jump host runs private Azure CLI, kubectl, Helm, Podman, signing/SBOM, and Anyscale CLI operations.</text>
+  <text x="40" y="862" class="small">Cleanup drains Anyscale resources before the single Terraform root destroys the lab.</text>
 </svg>

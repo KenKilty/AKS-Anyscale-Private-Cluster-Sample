@@ -27,8 +27,8 @@ output "private_link_validation" {
   value = {
     workspace_id                      = azurerm_log_analytics_workspace.this.id
     workspace_customer_id             = azurerm_log_analytics_workspace.this.workspace_id
-    internet_ingestion_enabled        = azurerm_log_analytics_workspace.this.internet_ingestion_enabled
-    internet_query_enabled            = azurerm_log_analytics_workspace.this.internet_query_enabled
+    internet_ingestion_enabled        = azurerm_log_analytics_workspace.this.internet_ingestion_access_type == "Enabled"
+    internet_query_enabled            = azurerm_log_analytics_workspace.this.internet_query_access_type == "Enabled"
     ampls_enabled                     = var.ampls_enabled
     ampls_scope_id                    = var.ampls_enabled ? azurerm_monitor_private_link_scope.this[0].id : null
     ampls_ingestion_access_mode       = var.ampls_enabled ? azurerm_monitor_private_link_scope.this[0].ingestion_access_mode : null

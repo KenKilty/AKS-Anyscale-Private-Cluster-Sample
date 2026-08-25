@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+"""Prove the custom image ships the packaged dependency.
+
+Emits CUSTOM_IMAGE_DEPENDENCY_PROOF_OK only when the dependency imports without
+a runtime install. On the standard image the import fails and no marker prints,
+which the harness reports as the expected standard-image failure.
+"""
+
 from __future__ import annotations
 
 import json

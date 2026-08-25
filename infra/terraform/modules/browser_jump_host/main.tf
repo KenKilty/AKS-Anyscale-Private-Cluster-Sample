@@ -44,6 +44,13 @@ resource "azurerm_windows_virtual_machine" "this" {
     type = "SystemAssigned"
   }
 
+  lifecycle {
+    ignore_changes = [
+      identity[0].identity_ids,
+      identity[0].type,
+    ]
+  }
+
   os_disk {
     name                 = "osdisk-${var.name}"
     caching              = "ReadWrite"

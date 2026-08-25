@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+"""Prove the Anyscale GPU training job runs on the private data plane.
+
+Emits GPU_TRAIN_JOB_PROOF_OK only when Ray Train reports the expected GPU and
+training result.
+"""
+
 from __future__ import annotations
 
 import json
@@ -9,10 +15,6 @@ os.environ.setdefault("RAY_TRAIN_V2_ENABLED", "0")
 os.environ.setdefault("RAY_OVERRIDE_JOB_RUNTIME_ENV", "1")
 
 import ray
-from ray import train
-from ray.train import ScalingConfig
-from ray.train.data_parallel_trainer import DataParallelTrainer
-
 from build_train_serve_common import (
     DEFAULT_LEARNING_RATE,
     DEFAULT_TRAIN_EPOCHS,
@@ -29,13 +31,16 @@ from build_train_serve_common import (
     train_perceptron,
     use_gpu_requested,
 )
+from ray import train
+from ray.train import ScalingConfig
+from ray.train.data_parallel_trainer import DataParallelTrainer
 
 
 def init_ray() -> None:
     runtime_env = {"working_dir": str(Path(__file__).resolve().parent)}
     try:
         ray.init(address="auto", ignore_reinit_error=True, log_to_driver=True, runtime_env=runtime_env)
-    except Exception:
+    except ConnectionError:
         ray.init(ignore_reinit_error=True, log_to_driver=True, runtime_env=runtime_env)
 
 

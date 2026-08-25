@@ -1,0 +1,6 @@
+{
+  // Line length is not a meaningful correctness rule for long-form operator docs.
+  "MD013": false,
+  // Ordered-list numbering style varies across the module docs.
+  "MD029": false
+}

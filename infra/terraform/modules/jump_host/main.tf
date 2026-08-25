@@ -40,6 +40,13 @@ resource "azurerm_linux_virtual_machine" "this" {
     type = "SystemAssigned"
   }
 
+  lifecycle {
+    ignore_changes = [
+      identity[0].identity_ids,
+      identity[0].type,
+    ]
+  }
+
   os_disk {
     name                 = "osdisk-${var.name}"
     caching              = "ReadWrite"
@@ -54,7 +61,7 @@ resource "azurerm_linux_virtual_machine" "this" {
     version   = var.source_image_reference.version
   }
 
-  custom_data = var.custom_data
+  custom_data = var.custom_data == "" ? null : var.custom_data
 
   dynamic "boot_diagnostics" {
     for_each = var.boot_diagnostics_enabled ? [1] : []

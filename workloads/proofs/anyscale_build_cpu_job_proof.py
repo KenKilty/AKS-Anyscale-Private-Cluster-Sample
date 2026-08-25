@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
+"""Prove the Anyscale CPU build job runs on the private data plane.
+
+Emits CPU_BUILD_JOB_PROOF_OK only when the deterministic job payload matches.
+"""
+
 from __future__ import annotations
 
 import json
 
 import ray
-
 from build_train_serve_common import (
     CPU_BUILD_JOB_SUCCESS_MARKER,
     CPU_BUILD_MANIFEST_PREFIX,
@@ -17,7 +21,7 @@ from build_train_serve_common import (
 def init_ray() -> None:
     try:
         ray.init(address="auto", ignore_reinit_error=True, log_to_driver=True)
-    except Exception:
+    except ConnectionError:
         ray.init(ignore_reinit_error=True, log_to_driver=True)
 
 
@@ -25,7 +29,7 @@ def init_ray() -> None:
 def annotate_row(row: dict[str, float | int]) -> dict[str, float | int]:
     return {
         **row,
-        "feature_bucket": int(round((float(row["x1"]) * 10) + (float(row["x2"]) * 10))),
+        "feature_bucket": round((float(row["x1"]) * 10) + (float(row["x2"]) * 10)),
     }
 
 

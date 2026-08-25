@@ -1,8 +1,8 @@
 ###############################################################################
-# Azure Key Vault — RBAC-authorized, public network access disabled, accessed
-# via private endpoint only. Holds the Notation signing certificate used to
-# sign custom container images (consumed by `notation` + the azure-kv plugin)
-# and read by AKS Image Integrity (Ratify) for signature verification.
+# Azure Key Vault — RBAC-authorized with a private endpoint. Public access is
+# optional and remains default-deny behind explicit client IP rules. Holds the
+# Notation signing certificate used to sign custom container images (consumed
+# by `notation` + the azure-kv plugin) and read by AKS Image Integrity (Ratify).
 # Docs:
 # - https://learn.microsoft.com/azure/key-vault/general/private-link-service
 # - https://learn.microsoft.com/azure/container-registry/container-registry-tutorial-sign-build-push
@@ -14,10 +14,20 @@ resource "azurerm_key_vault" "this" {
   tenant_id                     = var.tenant_id
   sku_name                      = "standard"
   rbac_authorization_enabled    = true
-  public_network_access_enabled = false
+  public_network_access_enabled = var.public_network_access_enabled
   purge_protection_enabled      = var.purge_protection_enabled
   soft_delete_retention_days    = var.soft_delete_retention_days
   tags                          = var.tags
+
+  # Default-deny firewall. AzureServices bypass lets trusted Azure platform
+  # services reach the vault; explicit IPv4 CIDRs let authorized clients use the
+  # public data-plane endpoint. The private endpoint keeps working regardless of
+  # these rules.
+  network_acls {
+    bypass         = "AzureServices"
+    default_action = "Deny"
+    ip_rules       = var.public_network_access_ip_rules
+  }
 }
 
 resource "azurerm_private_endpoint" "this" {

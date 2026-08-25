@@ -1,12 +1,19 @@
 #!/usr/bin/env bash
 # Module 1 — Build the persistent foundation and connect to the jump hosts.
 #
-# Wraps the infra/terraform root: VM-size selection, plan/apply, Bastion
-# SSH tunnel to the Linux jump host, Bastion portal RDP guidance for the
-# optional Windows browser host, and read-only verification of both paths.
-#
-# This module owns durable resources (shared VNet, Bastion, firewall, routing,
-# DNS, jump hosts) that outlive workload rebuilds.
+# Purpose: wrap the infra/terraform root for VM-size selection, plan/apply, the
+#          Bastion SSH tunnel to the Linux jump host, Bastion portal RDP
+#          guidance for the optional Windows browser host, and read-only
+#          verification of both paths. This module owns durable resources
+#          (VNet, Bastion, firewall, routing, DNS, jump hosts) that outlive
+#          workload rebuilds.
+# Usage:   ./scripts/anyscale-aks.sh module 1 {sizes|plan|apply|connect|verify|
+#          browser connect|browser verify}
+#          Runs on the operator workstation; Terraform never runs on a jump host.
+# Inputs:  the repo-root .env exported as TF_VAR_*; SSH_PRIVATE_KEY_PATH for
+#          Bastion SSH; cached Azure CLI auth.
+# Outputs: Terraform plan/apply output and Azure foundation resources; the
+#          selected VM sizes recorded under .cache/; non-zero exit on failure.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -14,7 +21,6 @@ SCRIPTS_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 ROOT_DIR="$(cd "${SCRIPTS_DIR}/.." && pwd)"
 ADMIN_DIR="${ROOT_DIR}/infra/terraform"
 ADMIN_CACHE="${ROOT_DIR}/.cache/aks-anyscale-sample-harness/admin"
-ADMIN_TFVARS="${ADMIN_DIR}/terraform.auto.tfvars.json"
 VM_SIZE_SELECTION_JSON="${ADMIN_CACHE}/vm-size-selection.json"
 
 LOG_INFO_PREFIX="module1"
@@ -192,9 +198,17 @@ selected_windows_vm_size() {
 }
 
 # ---------------------------------------------------------------------------
-# Admin tfvars rendering.
+# Foundation deployment inputs.
+#
+# Deployment variables come only from the repo-root .env, exported as TF_VAR_*
+# into this process. This function sources .env and exports the computed
+# VM-size and browser-host overrides directly so the in-process terraform
+# plan/apply below sees them. No tfvars file is written. setup.sh render is
+# invoked only to validate the .env inputs and clear any stale generated
+# artifact; exports from that child process do not propagate back here, so every
+# override this function needs is exported before the call.
 # ---------------------------------------------------------------------------
-render_admin_tfvars() {
+export_admin_tfvars() {
   local enable_browser="$1"
   load_env
 
@@ -231,9 +245,11 @@ render_admin_tfvars() {
   export TF_VAR_enable_browser_host="${enable_browser}"
   export TF_VAR_windows_browser_jump_host_vm_size="${windows_size:-Standard_D4s_v5}"
   export TF_VAR_windows_browser_jump_host_admin_username="${TF_VAR_windows_browser_jump_host_admin_username:-azureadmin}"
-  export TF_VAR_windows_browser_jump_host_admin_password="${TF_VAR_windows_browser_jump_host_admin_password:-}"
   export TF_VAR_browser_host_vm_user_login_principal_ids="${TF_VAR_browser_host_vm_user_login_principal_ids:-{}}"
   export TF_VAR_browser_host_vm_admin_login_principal_ids="${TF_VAR_browser_host_vm_admin_login_principal_ids:-{}}"
+  # Validation only: confirms .env produces a complete, well-formed deployment
+  # input set and removes any stale generated tfvars artifact. Its exports do not
+  # propagate back to this process.
   "${SCRIPTS_DIR}/setup.sh" render
 }
 
@@ -247,7 +263,7 @@ terraform_admin_init() {
 module_1_plan() {
   local enable_browser="false"
   [[ "${1:-}" == "--enable-browser-host" ]] && enable_browser="true"
-  render_admin_tfvars "${enable_browser}"
+  export_admin_tfvars "${enable_browser}"
   terraform_admin_init
   terraform_admin validate
   terraform_admin plan -input=false "${FOUNDATION_TARGETS[@]}"
@@ -258,12 +274,18 @@ module_1_apply() {
   local yes="false"
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --enable-browser-host) enable_browser="true"; shift ;;
-      --yes|-y) yes="true"; shift ;;
+      --enable-browser-host)
+        enable_browser="true"
+        shift
+        ;;
+      --yes | -y)
+        yes="true"
+        shift
+        ;;
       *) die "Unknown 'module 1 apply' option: $1" ;;
     esac
   done
-  render_admin_tfvars "${enable_browser}"
+  export_admin_tfvars "${enable_browser}"
   terraform_admin_init
   terraform_admin validate
   if [[ "${yes}" == "true" ]]; then
@@ -336,13 +358,13 @@ module_1_browser_connect() {
 module_1_verify() {
   load_env
   command -v az >/dev/null 2>&1 || die "Azure CLI (az) is required for verification."
-  local vm_id pip bastion_name
+  local vm_id bastion_name
   vm_id="$(admin_output linux_jump_host_vm_id)"
   [[ -n "${vm_id}" ]] || die "Admin outputs missing. Run 'module 1 apply' first."
   bastion_name="$(admin_output bastion_name)"
 
   log "Verifying Linux jump host has no public IP..."
-  local nic_ids public_ip
+  local public_ip
   public_ip="$(az vm list-ip-addresses --ids "${vm_id}" \
     --query '[0].virtualMachine.network.publicIpAddresses[].ipAddress' -o tsv 2>/dev/null || printf '')"
   if [[ -n "${public_ip}" ]]; then
@@ -416,14 +438,15 @@ main() {
     connect) module_1_connect "$@" ;;
     verify) module_1_verify "$@" ;;
     browser)
-      local b="${1:-}"; shift || true
+      local b="${1:-}"
+      shift || true
       case "${b}" in
         connect) module_1_browser_connect "$@" ;;
         verify) module_1_browser_verify "$@" ;;
         *) die "Usage: module 1 browser {connect|verify}" ;;
       esac
       ;;
-    ""|--help|-h) usage ;;
+    "" | --help | -h) usage ;;
     *) die "Unknown 'module 1' subcommand: ${sub}. Run 'module 1 --help'." ;;
   esac
 }

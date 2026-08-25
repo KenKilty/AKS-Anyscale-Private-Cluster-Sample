@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+"""Prove Ray CPU scheduling in the durable CPU workspace.
+
+Emits CPU_RAY_PROOF_OK only when the deterministic square-sum result matches.
+"""
+
 import json
 
 import ray

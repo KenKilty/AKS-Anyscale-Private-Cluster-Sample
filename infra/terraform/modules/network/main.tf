@@ -124,10 +124,11 @@ resource "azurerm_subnet_network_security_group_association" "pe" {
 resource "azurerm_subnet" "jump_host" {
   count = try(var.subnet_cidrs.jump_host, null) == null ? 0 : 1
 
-  name                 = var.subnet_names.jump_host
-  resource_group_name  = var.resource_group_name
-  virtual_network_name = azurerm_virtual_network.this.name
-  address_prefixes     = [var.subnet_cidrs.jump_host]
+  name                            = var.subnet_names.jump_host
+  resource_group_name             = var.resource_group_name
+  virtual_network_name            = azurerm_virtual_network.this.name
+  address_prefixes                = [var.subnet_cidrs.jump_host]
+  default_outbound_access_enabled = false
 }
 
 resource "azurerm_network_security_group" "jump_host" {
@@ -149,10 +150,11 @@ resource "azurerm_subnet_network_security_group_association" "jump_host" {
 resource "azurerm_subnet" "browser_jump_host" {
   count = try(var.subnet_cidrs.browser_jump_host, null) == null ? 0 : 1
 
-  name                 = var.subnet_names.browser_jump_host
-  resource_group_name  = var.resource_group_name
-  virtual_network_name = azurerm_virtual_network.this.name
-  address_prefixes     = [var.subnet_cidrs.browser_jump_host]
+  name                            = var.subnet_names.browser_jump_host
+  resource_group_name             = var.resource_group_name
+  virtual_network_name            = azurerm_virtual_network.this.name
+  address_prefixes                = [var.subnet_cidrs.browser_jump_host]
+  default_outbound_access_enabled = false
 }
 
 resource "azurerm_network_security_group" "browser_jump_host" {

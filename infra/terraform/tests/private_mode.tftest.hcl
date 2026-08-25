@@ -6,10 +6,11 @@
 ###############################################################################
 
 variables {
-  project        = "tftest"
-  environment    = "ci"
-  azure_location = "westus3"
-  region_short   = "wus3"
+  project             = "tftest"
+  environment         = "ci"
+  azure_location      = "westus2"
+  region_short        = "wus2"
+  enable_browser_host = false
 
   vnet_address_space = ["10.50.0.0/16"]
   subnet_cidrs = {
@@ -25,6 +26,8 @@ variables {
   }
 
   dns_forwarding_rules = {}
+
+  anyscale_jump_host_fqdns = []
 
   anyscale_fqdns = [
     "console.anyscale.com",
@@ -142,7 +145,7 @@ run "private_aks_and_egress_contract" {
 
   assert {
     condition     = length(output.private_mode_validation.aks.gpu_pool_availability_zones["T4"]) == 0
-    error_message = "The westus3 T4 GPU pool must not inherit system availability zones because Standard_NC16as_T4_v3 is non-zonal in this region."
+    error_message = "The westus2 T4 GPU pool must not inherit system availability zones because Standard_NC16as_T4_v3 is non-zonal in this region."
   }
 
   assert {
@@ -227,6 +230,16 @@ run "private_aks_and_egress_contract" {
   }
 
   assert {
+    condition     = length(output.private_mode_validation.firewall.browser_jump_host_cidrs) == 0
+    error_message = "Azure Portal firewall egress must be omitted when the Windows browser jump host is disabled."
+  }
+
+  assert {
+    condition     = contains(output.private_mode_validation.firewall.azure_portal_fqdns, "portal.azure.com") && contains(output.private_mode_validation.firewall.azure_portal_fqdns, "*.portal.azure.com") && contains(output.private_mode_validation.firewall.azure_portal_fqdns, "login.microsoftonline.com") && contains(output.private_mode_validation.firewall.azure_portal_fqdns, "*.msauth.net") && contains(output.private_mode_validation.firewall.azure_portal_fqdns, "management.azure.com")
+    error_message = "Firewall egress rules must include the documented Azure Portal authentication and framework FQDNs for the Windows browser jump-host subnet."
+  }
+
+  assert {
     condition     = contains(output.private_mode_validation.firewall.azure_monitor_fqdns, "global.handler.control.monitor.azure.com") && contains(output.private_mode_validation.firewall.azure_monitor_fqdns, "*.ods.opinsights.azure.com") && contains(output.private_mode_validation.firewall.azure_monitor_fqdns, "*.ingest.monitor.azure.com") && contains(output.private_mode_validation.firewall.azure_monitor_fqdns, "*.monitoring.azure.com")
     error_message = "Firewall egress rules must include Azure Monitor Agent, Log Analytics ingestion, DCE ingestion, and metrics endpoints."
   }
@@ -244,6 +257,11 @@ run "private_aks_and_egress_contract" {
   assert {
     condition     = output.private_mode_validation.storage.account_replication_type == "ZRS"
     error_message = "Storage account must use ZRS for zone-resilient enterprise posture in supported regions."
+  }
+
+  assert {
+    condition     = output.private_mode_validation.keyvault.public_network_access_enabled == false && output.private_mode_validation.keyvault.network_default_action == "Deny" && length(output.private_mode_validation.keyvault.network_ip_rules) == 0 && output.private_mode_validation.keyvault.private_endpoint_auto_approved
+    error_message = "Key Vault must default to private-endpoint-only access with a default-deny firewall and automatic private endpoint approval."
   }
 
   assert {
@@ -300,4 +318,104 @@ run "private_aks_and_egress_contract" {
     condition     = output.private_mode_validation.kubelogin_access.azure_rbac_enabled == true && contains(output.private_mode_validation.kubelogin_access.role_assignments, "Azure Kubernetes Service RBAC Cluster Admin")
     error_message = "The deploying principal must receive Entra-backed AKS RBAC access for kubelogin validation."
   }
+}
+
+run "browser_host_password_picker_rbac_contract" {
+  command = plan
+
+  variables {
+    enable_browser_host                      = true
+    windows_browser_jump_host_admin_password = "Tftest-NotReal-Passw0rd!"
+    key_vault_public_network_access_enabled  = true
+    key_vault_public_access_cidrs_csv        = "203.0.113.10/32, 198.51.100.0/24"
+    browser_host_admin_password_secret_reader_principal_ids = {
+      operator = "00000000-0000-0000-0000-000000000001"
+    }
+  }
+
+  assert {
+    condition     = azurerm_role_assignment.browser_host_admin_password_reader["operator"].role_definition_name == "Key Vault Secrets User"
+    error_message = "The picker principal must be able to read the selected secret value."
+  }
+
+  assert {
+    condition     = azapi_resource_action.browser_host_admin_password[0].method == "PUT" && azapi_resource_action.browser_host_admin_password[0].when == "apply"
+    error_message = "The browser-host fallback password must be created through ARM without an unsupported remote DELETE action."
+  }
+
+  assert {
+    condition     = length(output.private_mode_validation.firewall.browser_jump_host_cidrs) == 1 && contains(output.private_mode_validation.firewall.browser_jump_host_cidrs, "10.50.3.32/27")
+    error_message = "Azure Portal firewall egress must be scoped only to the enabled Windows browser jump-host subnet."
+  }
+
+  assert {
+    condition     = contains(output.private_mode_validation.firewall.azure_portal_fqdns, "portal.azure.com") && contains(output.private_mode_validation.firewall.azure_portal_fqdns, "*.portal.azure.com") && contains(output.private_mode_validation.firewall.azure_portal_fqdns, "login.microsoftonline.com") && contains(output.private_mode_validation.firewall.azure_portal_fqdns, "*.msauth.net") && contains(output.private_mode_validation.firewall.azure_portal_fqdns, "management.azure.com")
+    error_message = "The enabled Windows browser host must receive the documented Azure Portal authentication and framework FQDNs."
+  }
+
+  assert {
+    condition     = contains(output.private_mode_validation.firewall.azure_portal_protocols, "HTTP:80") && contains(output.private_mode_validation.firewall.azure_portal_protocols, "HTTPS:443")
+    error_message = "The enabled Windows browser host must allow the documented Azure Portal HTTP and HTTPS ports."
+  }
+
+  assert {
+    condition     = azurerm_role_assignment.browser_host_admin_password_metadata_reader["operator"].role_definition_name == "Key Vault Reader"
+    error_message = "The picker principal must be able to list vault and secret metadata."
+  }
+
+  assert {
+    condition = (
+      output.browser_jump_host_admin_username == output.browser_host_admin_username &&
+      keys(output.browser_jump_host_admin_password_secret) == keys(output.browser_host_admin_password_secret) &&
+      output.browser_jump_host_admin_password_secret.enabled == output.browser_host_admin_password_secret.enabled &&
+      output.browser_jump_host_admin_password_secret.secret_name == output.browser_host_admin_password_secret.secret_name &&
+      output.browser_jump_host_admin_password_secret.reader_principal_count == output.browser_host_admin_password_secret.reader_principal_count &&
+      output.browser_jump_host_admin_password_secret.password_generated == output.browser_host_admin_password_secret.password_generated
+    )
+    error_message = "Canonical browser jump-host outputs must remain equivalent to their compatibility aliases for all plan-known fields."
+  }
+
+  assert {
+    condition     = output.private_mode_validation.keyvault.public_network_access_enabled && output.private_mode_validation.keyvault.network_default_action == "Deny" && output.private_mode_validation.keyvault.network_ip_rules == toset(["203.0.113.10/32", "198.51.100.0/24"])
+    error_message = "Optional Key Vault access must remain default-deny and parse the configured IPv4 CIDR CSV."
+  }
+
+  assert {
+    condition     = output.private_mode_validation.keyvault.private_endpoint_auto_approved
+    error_message = "Optional client access must not disable automatic approval of the Key Vault private endpoint."
+  }
+
+}
+
+run "browser_host_password_picker_rejects_malformed_cidr" {
+  command = plan
+
+  variables {
+    key_vault_public_network_access_enabled = true
+    key_vault_public_access_cidrs_csv       = "203.0.113.0/33"
+  }
+
+  expect_failures = [var.key_vault_public_access_cidrs_csv]
+}
+
+run "browser_host_password_picker_rejects_ipv6_client" {
+  command = plan
+
+  variables {
+    key_vault_public_network_access_enabled = true
+    key_vault_public_access_cidrs_csv       = "2001:db8::1/128"
+  }
+
+  expect_failures = [var.key_vault_public_access_cidrs_csv]
+}
+
+run "browser_host_password_picker_rejects_rule_when_disabled" {
+  command = plan
+
+  variables {
+    key_vault_public_network_access_enabled = false
+    key_vault_public_access_cidrs_csv       = "203.0.113.10/32"
+  }
+
+  expect_failures = [var.key_vault_public_access_cidrs_csv]
 }

@@ -33,6 +33,7 @@ handoffs:
 You own the execution and evidence surface — not the cloud infra.
 
 ## Scope
+
 - `scripts/anyscale-aks.sh` (dispatcher), `scripts/setup.sh` (core, ~8k lines —
   read in ranges only), `scripts/modules/module-{1,2,3}-*.sh`, `scripts/lib/*.sh`,
   `scripts/utility/*`.
@@ -42,6 +43,7 @@ You own the execution and evidence surface — not the cloud infra.
 - `RESULTS.md` evidence shape and the `docs/**` developer workflows.
 
 ## Conventions (must preserve)
+
 - All shell is `set -euo pipefail`; long ops go through `run_with_timeout`
   (exit 124 = timeout); honor the `SETUP_TIMEOUT_*` knobs.
 - The standard-image custom-image failure is **intentional** — it proves runtime
@@ -56,13 +58,22 @@ You own the execution and evidence surface — not the cloud infra.
   `RUNNING`), not bare PASS/FAIL.
 
 ## Mandatory gate after edits
+
 `bash -n` on edited `scripts/**/*.sh`; `python3 -m py_compile` on edited
 `workloads/proofs/*.py`; or the **quality: gate (fast)** task. Never claim a live
 proof passes without a real successful run log.
 
 ## Operational safety
+
 Local edits and read-only checks only. Never run `deploy`/`e2e`/`proof` (live) /
 `teardown`/`nuke` without explicit user instruction.
 
+## Bug fixes: reproduce first
+
+Capture the failure (log excerpt, `bash -n` / `py_compile` error, missing proof
+marker) before writing the fix, then re-run the same check and show it passing.
+
 ## Finish
-Report files changed and gate results. Never commit/push. Hand off to the reviewer.
+
+Report files changed and gate results. Terse — no preamble, no praise, and name
+anything you did not verify. Never commit/push. Hand off to the reviewer.

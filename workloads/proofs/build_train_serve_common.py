@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
+"""Shared markers and helpers for the build, train, and serve proofs.
+
+Centralizes the proof marker names so the payloads and the harness grep stay in
+sync.
+"""
+
 from __future__ import annotations
 
 import json
 import os
-from typing import Any, Iterable
+from collections.abc import Iterable
+from typing import Any
 
 CPU_BUILD_JOB_SUCCESS_MARKER = "CPU_BUILD_JOB_PROOF_OK"
 GPU_TRAIN_JOB_SUCCESS_MARKER = "GPU_TRAIN_JOB_PROOF_OK"
@@ -62,8 +69,8 @@ def dataset_manifest(rows: Iterable[dict[str, float | int]]) -> dict[str, int]:
     for row in rows:
         row_count += 1
         label = int(row["label"])
-        scaled_x1 = int(round(float(row["x1"]) * 1000))
-        scaled_x2 = int(round(float(row["x2"]) * 1000))
+        scaled_x1 = round(float(row["x1"]) * 1000)
+        scaled_x2 = round(float(row["x2"]) * 1000)
         label_sum += label
         feature_checksum += (int(row["record_id"]) + 1) * (scaled_x1 + (3 * scaled_x2) + (17 * label))
     return {
