@@ -27,6 +27,8 @@ REPO_URL="${ANYSCALE_AKS_REPO_URL:-}"
 LOG_INFO_PREFIX="bootstrap"
 LOG_WARN_PREFIX="bootstrap"
 LOG_ERROR_PREFIX="bootstrap"
+AZURE_IDENTITY_LOGIN_ATTEMPTS="${AZURE_IDENTITY_LOGIN_ATTEMPTS:-40}"
+AZURE_IDENTITY_LOGIN_INTERVAL_SECONDS="${AZURE_IDENTITY_LOGIN_INTERVAL_SECONDS:-15}"
 
 if [[ -f "$(dirname "${BASH_SOURCE[0]}")/lib/log.sh" ]]; then
   # shellcheck source=lib/log.sh
@@ -78,12 +80,27 @@ install_azure_cli() {
 }
 
 ensure_azure_cli_identity_login() {
-  if az account show --only-show-errors >/dev/null 2>&1; then
+  local expected_subscription="${TF_VAR_azure_subscription_id:-${ARM_SUBSCRIPTION_ID:-}}"
+  if az account show --only-show-errors >/dev/null 2>&1 &&
+    { [[ -z "${expected_subscription}" ]] || az account set --subscription "${expected_subscription}" --only-show-errors >/dev/null 2>&1; }; then
     log "Azure CLI already authenticated."
     return 0
   fi
   log "Logging Azure CLI in with the jump host managed identity..."
-  az login --identity --only-show-errors >/dev/null
+  local attempt
+  for ((attempt = 1; attempt <= AZURE_IDENTITY_LOGIN_ATTEMPTS; attempt++)); do
+    if az login --identity --only-show-errors >/dev/null 2>&1 &&
+      { [[ -z "${expected_subscription}" ]] || az account set --subscription "${expected_subscription}" --only-show-errors >/dev/null 2>&1; }; then
+      return 0
+    fi
+
+    if ((attempt == AZURE_IDENTITY_LOGIN_ATTEMPTS)); then
+      die "Managed-identity login did not discover the Azure subscription after ${AZURE_IDENTITY_LOGIN_ATTEMPTS} attempts. Verify the jump-host role assignments."
+    fi
+
+    warn "Azure role assignments are not visible to the managed identity yet (attempt ${attempt}/${AZURE_IDENTITY_LOGIN_ATTEMPTS}); retrying in ${AZURE_IDENTITY_LOGIN_INTERVAL_SECONDS}s."
+    sleep "${AZURE_IDENTITY_LOGIN_INTERVAL_SECONDS}"
+  done
 }
 
 install_kubectl() {

@@ -1,0 +1,135 @@
+<mxfile host="app.diagrams.net" modified="2026-08-24T00:00:00.000Z" agent="GitHub Copilot" version="24.7.17" type="device">
+  <diagram id="anyscale-components" name="Anyscale Components">
+    <mxGraphModel dx="1640" dy="1120" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1640" pageHeight="1120" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="bg" value="" style="shape=rect;html=1;strokeColor=none;fillColor=#FFFFFF;" vertex="1" parent="1">
+          <mxGeometry x="0" y="0" width="1640" height="1120" as="geometry"/>
+        </mxCell>
+        <mxCell id="title" value="Anyscale platform components and control-plane connectivity" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Inter,Segoe UI,Arial;fontSize=26;fontStyle=1;fontColor=#111827;" vertex="1" parent="1">
+          <mxGeometry x="40" y="24" width="1300" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="subtitle" value="Anyscale managed control plane, Azure ARM integration, the in-cluster Anyscale runtime, and private Azure dependencies. The default control-plane route is via Azure Firewall; an optional cross-tenant Private Link path is shown dashed." style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Inter,Segoe UI,Arial;fontSize=14;fontColor=#475569;" vertex="1" parent="1">
+          <mxGeometry x="40" y="70" width="1560" height="30" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="zoneControl" value="Anyscale managed control plane - outside the customer subscription" style="rounded=1;whiteSpace=wrap;html=1;arcSize=4;strokeColor=#64748B;fillColor=#F8FAFC;fontFamily=Inter,Segoe UI,Arial;fontSize=15;fontStyle=1;fontColor=#334155;align=left;verticalAlign=top;spacingLeft=18;spacingTop=10;" vertex="1" parent="1">
+          <mxGeometry x="40" y="110" width="1560" height="150" as="geometry"/>
+        </mxCell>
+        <mxCell id="tConsole" value="Public console / OAuth&#xa;console.azure.anyscale.com" style="shape=mxgraph.flowchart.terminator;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#F59E0B;fontFamily=Inter,Segoe UI,Arial;fontSize=12;fontColor=#0F172A;" vertex="1" parent="1">
+          <mxGeometry x="120" y="150" width="360" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="tCloud" value="Cloud-specific control-plane endpoint&#xa;cld-{id}.azure.anyscale-cloud.dev" style="shape=mxgraph.flowchart.terminator;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#64748B;fontFamily=Inter,Segoe UI,Arial;fontSize=12;fontColor=#0F172A;" vertex="1" parent="1">
+          <mxGeometry x="640" y="150" width="420" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="tPls" value="Anyscale Private Link Service&#xa;(optional)" style="shape=mxgraph.flowchart.terminator;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#14B8A6;dashed=1;dashPattern=8 4;fontFamily=Inter,Segoe UI,Arial;fontSize=12;fontColor=#0F172A;" vertex="1" parent="1">
+          <mxGeometry x="1120" y="150" width="400" height="80" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="zoneArm" value="Azure ARM integration" style="rounded=1;whiteSpace=wrap;html=1;arcSize=4;strokeColor=#64748B;fillColor=#F1F5F9;fontFamily=Inter,Segoe UI,Arial;fontSize=15;fontStyle=1;fontColor=#334155;align=left;verticalAlign=top;spacingLeft=18;spacingTop=10;" vertex="1" parent="1">
+          <mxGeometry x="40" y="290" width="1560" height="150" as="geometry"/>
+        </mxCell>
+        <mxCell id="armPlatform" value="Anyscale.Platform/cloud&#xa;+ cloudResources/default" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;strokeColor=#64748B;fillColor=#FFFFFF;fontFamily=Inter,Segoe UI,Arial;fontSize=12;fontColor=#0F172A;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="120" y="330" width="400" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="armDeploy" value="ARM deployment&#xa;(Terraform / AzAPI)" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;strokeColor=#64748B;fillColor=#FFFFFF;fontFamily=Inter,Segoe UI,Arial;fontSize=12;fontColor=#0F172A;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="640" y="330" width="280" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="armExtension" value="AKS marketplace extension&#xa;Anyscale operator install" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;strokeColor=#64748B;fillColor=#FFFFFF;fontFamily=Inter,Segoe UI,Arial;fontSize=12;fontColor=#0F172A;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="1040" y="330" width="400" height="80" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="operatorWs" value="Operator workstation&#xa;(outside VNet)&#xa;local CLI / OAuth / teardown" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;strokeColor=#CBD5E1;fillColor=#FFFFFF;fontFamily=Inter,Segoe UI,Arial;fontSize=12;fontColor=#111827;align=center;verticalAlign=middle;spacing=6;" vertex="1" parent="1">
+          <mxGeometry x="40" y="600" width="230" height="130" as="geometry"/>
+        </mxCell>
+        <mxCell id="legend" value="Legend&#xa;Solid: required / default path&#xa;Dashed: optional Private Link path&#xa;Terminator shape: external system" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;strokeColor=#CBD5E1;fillColor=#FFFFFF;fontFamily=Inter,Segoe UI,Arial;fontSize=12;fontColor=#334155;align=left;verticalAlign=middle;spacingLeft=12;spacing=6;" vertex="1" parent="1">
+          <mxGeometry x="40" y="770" width="230" height="130" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="zoneVnet" value="Customer private virtual network / private AKS" style="rounded=1;whiteSpace=wrap;html=1;arcSize=3;strokeColor=#94A3B8;dashed=1;dashPattern=8 4;fillColor=#FFFFFF;fontFamily=Inter,Segoe UI,Arial;fontSize=15;fontStyle=1;fontColor=#334155;align=left;verticalAlign=top;spacingLeft=18;spacingTop=10;" vertex="1" parent="1">
+          <mxGeometry x="300" y="470" width="1300" height="610" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="aksBox" value="Private AKS" style="rounded=1;whiteSpace=wrap;html=1;arcSize=4;strokeColor=#2563EB;fillColor=#F8FBFF;fontFamily=Inter,Segoe UI,Arial;fontSize=13;fontStyle=1;fontColor=#1E3A8A;align=left;verticalAlign=top;spacingLeft=14;spacingTop=8;" vertex="1" parent="1">
+          <mxGeometry x="330" y="530" width="840" height="510" as="geometry"/>
+        </mxCell>
+        <mxCell id="operator" value="Anyscale operator&#xa;Workload Identity / UAMI" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;strokeColor=#10B981;fillColor=#ECFDF5;fontFamily=Inter,Segoe UI,Arial;fontSize=12;fontColor=#064E3B;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="360" y="590" width="360" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="compute" value="Compute configs&#xa;(CPU / GPU)" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;strokeColor=#2563EB;fillColor=#FFFFFF;fontFamily=Inter,Segoe UI,Arial;fontSize=12;fontColor=#0F172A;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="740" y="590" width="180" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="workspaces" value="Durable workspaces" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;strokeColor=#2563EB;fillColor=#FFFFFF;fontFamily=Inter,Segoe UI,Arial;fontSize=12;fontColor=#0F172A;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="940" y="590" width="200" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="jobs" value="Jobs / services" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;strokeColor=#2563EB;fillColor=#FFFFFF;fontFamily=Inter,Segoe UI,Arial;fontSize=12;fontColor=#0F172A;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="360" y="700" width="200" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="ray" value="Ray head / workers / Serve" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;strokeColor=#2563EB;fillColor=#FFFFFF;fontFamily=Inter,Segoe UI,Arial;fontSize=12;fontColor=#0F172A;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="580" y="700" width="360" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="gateway" value="Internal Gateway API + HTTPRoutes + TLS (internal load balancer)" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;strokeColor=#10B981;fillColor=#ECFDF5;fontFamily=Inter,Segoe UI,Arial;fontSize=12;fontColor=#064E3B;align=center;verticalAlign=middle;spacing=6;" vertex="1" parent="1">
+          <mxGeometry x="360" y="810" width="780" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="firewall" value="snet-firewall&#xa;Azure Firewall (default egress)" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;strokeColor=#F59E0B;fillColor=#FFF7ED;fontFamily=Inter,Segoe UI,Arial;fontSize=12;fontColor=#0F172A;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="360" y="910" width="340" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="crossPe" value="Cross-tenant private endpoint&#xa;+ private DNS (manual approval)" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;dashed=1;dashPattern=8 4;strokeColor=#14B8A6;fillColor=#F0FDFA;fontFamily=Inter,Segoe UI,Arial;fontSize=12;fontColor=#0F766E;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="740" y="910" width="400" height="90" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="deps" value="Private Azure dependencies (via private endpoints)" style="rounded=1;whiteSpace=wrap;html=1;arcSize=4;strokeColor=#10B981;fillColor=#F0FDF4;fontFamily=Inter,Segoe UI,Arial;fontSize=13;fontStyle=1;fontColor=#065F46;align=left;verticalAlign=top;spacingLeft=12;spacingTop=8;" vertex="1" parent="1">
+          <mxGeometry x="1200" y="530" width="380" height="510" as="geometry"/>
+        </mxCell>
+        <mxCell id="depAdls" value="ADLS Gen2" style="shape=mxgraph.flowchart.terminator;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#10B981;fontFamily=Inter,Segoe UI,Arial;fontSize=12;fontColor=#064E3B;" vertex="1" parent="1">
+          <mxGeometry x="1230" y="600" width="320" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="depAcr" value="Azure Container Registry" style="shape=mxgraph.flowchart.terminator;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#10B981;fontFamily=Inter,Segoe UI,Arial;fontSize=12;fontColor=#064E3B;" vertex="1" parent="1">
+          <mxGeometry x="1230" y="700" width="320" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="depKv" value="Key Vault" style="shape=mxgraph.flowchart.terminator;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#10B981;fontFamily=Inter,Segoe UI,Arial;fontSize=12;fontColor=#064E3B;" vertex="1" parent="1">
+          <mxGeometry x="1230" y="800" width="320" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="depNote" value="ADLS Gen2, ACR, and Key Vault use private endpoints, private DNS, and identity-based access." style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Inter,Segoe UI,Arial;fontSize=11;fontColor=#065F46;" vertex="1" parent="1">
+          <mxGeometry x="1230" y="890" width="320" height="120" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="noteConsole" value="console.azure.anyscale.com stays public for local CLI, OAuth, and teardown. Private Link covers the cloud-specific control-plane domain only; Entra, ARM, and registry egress remain required. Private Link does not remove all egress." style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Inter,Segoe UI,Arial;fontSize=12;fontColor=#334155;" vertex="1" parent="1">
+          <mxGeometry x="40" y="1050" width="1300" height="50" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="eWsConsole" value="local CLI OAuth / teardown" style="edgeStyle=orthogonalEdgeStyle;rounded=1;dashed=1;dashPattern=6 4;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#2563EB;fontSize=10;fontColor=#1D4ED8;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="operatorWs" target="tConsole">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="eWsArm" value="Terraform / ARM" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#64748B;fontSize=10;fontColor=#475569;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="operatorWs" target="armDeploy">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="ePlatformArm" value="declare cloud" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#64748B;fontSize=10;fontColor=#475569;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="armPlatform" target="armDeploy">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="eArmExtension" value="register" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#64748B;fontSize=10;fontColor=#475569;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="armDeploy" target="armExtension">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="eExtensionOperator" value="installs operator" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#64748B;fontSize=10;fontColor=#475569;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="armExtension" target="operator">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="eOperatorFirewall" value="default control-plane route" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#F59E0B;fontSize=10;fontColor=#B45309;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="operator" target="firewall">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="eFirewallCloud" value="default egress to control plane" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#F59E0B;fontSize=10;fontColor=#B45309;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="firewall" target="tCloud">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="eOperatorCrossPe" value="optional: private DNS" style="edgeStyle=orthogonalEdgeStyle;rounded=1;dashed=1;dashPattern=8 4;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#14B8A6;fontSize=10;fontColor=#0F766E;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="operator" target="crossPe">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="eCrossPePls" value="cross-tenant Private Link" style="edgeStyle=orthogonalEdgeStyle;rounded=1;dashed=1;dashPattern=8 4;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#14B8A6;fontSize=10;fontColor=#0F766E;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="crossPe" target="tPls">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="eRayDeps" value="private endpoints" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#10B981;fontSize=10;fontColor=#047857;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="ray" target="deps">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

@@ -337,6 +337,14 @@ resource "azurerm_monitor_data_collection_rule" "container_insights" {
   }
 }
 
+resource "azurerm_role_assignment" "container_insights_publisher" {
+  scope                            = azurerm_kubernetes_cluster.this.id
+  role_definition_name             = "Monitoring Metrics Publisher"
+  principal_id                     = azurerm_user_assigned_identity.aks_control_plane.principal_id
+  principal_type                   = "ServicePrincipal"
+  skip_service_principal_aad_check = true
+}
+
 resource "azurerm_monitor_data_collection_rule_association" "container_insights" {
   name                    = "ContainerInsightsExtension"
   target_resource_id      = azurerm_kubernetes_cluster.this.id
@@ -401,17 +409,21 @@ resource "azurerm_role_assignment" "current_principal_cluster_admin" {
 resource "azurerm_role_assignment" "cluster_user" {
   for_each = var.cluster_user_principal_ids
 
-  scope                = azurerm_kubernetes_cluster.this.id
-  role_definition_name = "Azure Kubernetes Service Cluster User Role"
-  principal_id         = each.value
+  scope                            = azurerm_kubernetes_cluster.this.id
+  role_definition_name             = "Azure Kubernetes Service Cluster User Role"
+  principal_id                     = each.value
+  principal_type                   = each.key == "jump_host" ? "ServicePrincipal" : null
+  skip_service_principal_aad_check = each.key == "jump_host"
 }
 
 resource "azurerm_role_assignment" "cluster_admin" {
   for_each = var.cluster_admin_principal_ids
 
-  scope                = azurerm_kubernetes_cluster.this.id
-  role_definition_name = "Azure Kubernetes Service RBAC Cluster Admin"
-  principal_id         = each.value
+  scope                            = azurerm_kubernetes_cluster.this.id
+  role_definition_name             = "Azure Kubernetes Service RBAC Cluster Admin"
+  principal_id                     = each.value
+  principal_type                   = each.key == "jump_host" ? "ServicePrincipal" : null
+  skip_service_principal_aad_check = each.key == "jump_host"
 }
 
 ###############################################################################

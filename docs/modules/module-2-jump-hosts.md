@@ -93,6 +93,10 @@ also synchronizes the working tree.
    `notation-azure-kv` plugin, Syft, ORAS, and the Anyscale CLI at
    `.venv/bin/anyscale`.
 
+  On a new deployment, Azure can take several minutes to make the Module 1
+  jump-host role assignments visible to its managed identity. The bootstrap
+  retries managed-identity login for up to 10 minutes before failing.
+
    > **Note:** The bootstrap refuses to run on the workstation. Run it only from
    > the Linux jump host. Because it is idempotent, you can safely rerun it.
 

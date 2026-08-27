@@ -78,6 +78,7 @@ resource "azurerm_resource_group_policy_remediation" "image_integrity" {
   resource_group_id              = var.resource_group_id
   policy_assignment_id           = azurerm_resource_group_policy_assignment.image_integrity[0].id
   policy_definition_reference_id = "deployAKSImageIntegrity"
+  resource_discovery_mode        = "ReEvaluateCompliance"
 
   depends_on = [azurerm_role_assignment.policy_remediation_contributor]
 }

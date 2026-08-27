@@ -218,12 +218,12 @@ run "operator_control_plane_url_split" {
   variables {
     anyscale_platform = {
       enabled                    = true
-      operator_control_plane_url = "https://cld-00000000000000000000000000.azure.anyscale-cloud.dev"
+      operator_control_plane_url = "https://cld-cldrsrc_00000000000000000000000000.azure.anyscale-cloud.dev"
     }
   }
 
   assert {
-    condition     = output.anyscale_platform_contract.operator_control_plane_url == "https://cld-00000000000000000000000000.azure.anyscale-cloud.dev"
+    condition     = output.anyscale_platform_contract.operator_control_plane_url == "https://cld-cldrsrc_00000000000000000000000000.azure.anyscale-cloud.dev"
     error_message = "The operator control plane URL must use the configured private host."
   }
 

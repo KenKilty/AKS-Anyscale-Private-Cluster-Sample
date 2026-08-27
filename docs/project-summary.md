@@ -12,6 +12,14 @@ commands are in [Maintainer Workflows](maintainer-workflows.md).
 
 ![Architecture overview](diagrams/01-architecture-overview.drawio.png)
 
+The [architecture landing page](architecture.md) collects the high-level view, a
+security feature and purpose table, and two detailed views: the AKS components
+and networking view and the Anyscale platform components view.
+
+![AKS components and networking](diagrams/06-aks-networking.svg)
+
+![Anyscale platform components](diagrams/07-anyscale-components.svg)
+
 - A private AKS cluster runs system, CPU, and GPU pools, the Anyscale operator,
   durable workspaces, jobs, and services.
 - Private ADLS Gen2, ACR, Key Vault, and Azure Monitor endpoints support the

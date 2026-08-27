@@ -5,10 +5,10 @@
 Audit signed and unsigned images with AKS Image Integrity, Azure Policy,
 Gatekeeper, and Ratify.
 
-> **Warning:** AKS Image Integrity is a Preview feature, and the behavior this
-> module demonstrates is audit-only. Unsigned images are reported as
-> non-compliant but still start. Do not describe this as admission enforcement,
-> and do not rely on it for production registries or workloads.
+> **Note:** AKS Image Integrity is in Preview and this module demonstrates
+> audit-only behavior. Unsigned images are reported as non-compliant but still
+> start; this is not admission enforcement and is not suitable for production
+> registries or workloads.
 
 ## Prerequisites
 
@@ -212,10 +212,10 @@ manifest ownership and validation checks are listed in the
 
 ## Production Limitation
 
-This guide validates the current Preview audit signal only. It does not provide
-admission enforcement, and it must not be represented as blocking unsigned
-images. Use a supported production image-verification control before relying on
-signature policy as a deployment gate.
+This module validates the current Preview audit signal only. It does not provide
+admission enforcement and does not block unsigned images from starting. Use a
+supported production image-verification control before relying on signature
+policy as a deployment gate.
 
 ## Next Step
 

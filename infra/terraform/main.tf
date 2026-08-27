@@ -255,9 +255,11 @@ module "acr" {
 resource "azurerm_role_assignment" "acr_push" {
   for_each = var.acr_push_principal_ids
 
-  scope                = module.acr.acr_id
-  role_definition_name = "AcrPush"
-  principal_id         = each.value
+  scope                            = module.acr.acr_id
+  role_definition_name             = "AcrPush"
+  principal_id                     = each.value
+  principal_type                   = each.key == "jump_host" ? "ServicePrincipal" : null
+  skip_service_principal_aad_check = each.key == "jump_host"
 }
 
 ###############################################################################

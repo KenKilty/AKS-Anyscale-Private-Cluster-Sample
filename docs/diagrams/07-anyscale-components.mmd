@@ -1,0 +1,70 @@
+---
+title: Anyscale platform components and control-plane connectivity
+config:
+  layout: dagre
+  theme: base
+  flowchart:
+    htmlLabels: true
+    curve: linear
+    nodeSpacing: 45
+    rankSpacing: 70
+  themeVariables:
+    fontFamily: Segoe UI, Arial, sans-serif
+    fontSize: 14px
+    edgeLabelBackground: "#ffffff"
+---
+flowchart TB
+  OP(["Operator workstation<br/>outside VNet"])
+
+  subgraph ARM["Azure ARM integration"]
+    direction TB
+    ARMDEPLOY["Terraform / AzAPI deployment<br/>Anyscale.Platform cloud + cloudResources/default<br/>AKS extension installs operator"]
+  end
+
+  subgraph VNET["Customer VNet — private AKS"]
+    direction TB
+    OPER["Anyscale operator<br/>Workload Identity / UAMI"]
+    CC["Compute configs"]
+    WS["Durable workspaces"]
+    JS["Jobs / services"]
+    RAY["Ray head / workers / Serve"]
+    GW["Internal Gateway API<br/>HTTPRoutes / TLS"]
+    FW["Azure Firewall"]
+    PE["Optional private endpoint<br/>private DNS + manual approval"]
+    DEP["ADLS Gen2 · ACR · Key Vault<br/>private endpoints · identity-based access"]
+  end
+
+  subgraph MGMT["Anyscale managed control plane"]
+    direction TB
+    ACON(["Public console / OAuth<br/>local CLI + teardown"])
+    AEP(["Cloud-specific<br/>endpoint"])
+    APLS(["Private Link Service<br/>optional"])
+  end
+
+  ARMDEPLOY --> OPER
+  OP -->|public Internet| ACON
+  OPER --> CC
+  CC --> WS
+  CC --> JS
+  WS --> RAY
+  JS --> RAY
+  RAY --> GW
+  RAY --> DEP
+  OPER --> FW
+  FW --> AEP
+  OPER -.-> PE
+  PE -.-> APLS
+
+  classDef blue fill:#e6f0fb,stroke:#2f6fb0,color:#0b2440,stroke-width:1.2px;
+  classDef green fill:#e7f4ec,stroke:#2e8b57,color:#0b2a1a,stroke-width:1.2px;
+  classDef orange fill:#fdebd8,stroke:#c9741d,color:#3a2408,stroke-width:1.2px;
+  classDef gray fill:#eef0f2,stroke:#7a8390,color:#1e2530,stroke-width:1.2px;
+  classDef teal fill:#dcf1ef,stroke:#0f766e,color:#0a2e2a,stroke-width:1.2px,stroke-dasharray:4 3;
+
+  class OP,OPER,CC,WS,JS,RAY,GW blue;
+  class DEP green;
+  class FW orange;
+  class ACON,AEP,ARMDEPLOY gray;
+  class APLS,PE teal;
+
+  linkStyle 11,12 stroke:#0f766e,stroke-width:1.6px,stroke-dasharray:5 5;

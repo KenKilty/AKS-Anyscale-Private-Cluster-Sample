@@ -62,6 +62,23 @@ The harness exports `TF_VAR_*` directly and does not write a tfvars file. Do not
 commit secrets or use a second `-var-file` input source. The complete input and
 hardening reference is [Configuration Reference](../configuration-reference.md).
 
+### Isolate a Second Lab Deployment
+
+Terraform uses the local state in `infra/terraform`. If this checkout already
+contains state for another resource group, select a dedicated Terraform
+workspace before changing the naming inputs in `.env`:
+
+```bash
+terraform -chdir=infra/terraform workspace new <workspace-name>
+export TF_WORKSPACE=<workspace-name>
+terraform -chdir=infra/terraform workspace show
+```
+
+Keep `TF_WORKSPACE` exported in every workstation terminal used for this lab.
+The final command must print the new workspace name before you run `module 1
+plan`. An empty workspace prevents the new plan from updating or replacing
+resources tracked by the existing state.
+
 > **Warning:** The template default grants the Linux jump-host identity
 > `Contributor` and `Role Based Access Control Administrator` at the configured
 > scope. That is deliberately broad so the lab workflow succeeds. Use a
@@ -104,6 +121,16 @@ Run all commands in this section from the workstation.
    the proposed foundation resources. Confirm the subscription, resource-group
    name, CIDRs, firewall, Bastion, jump hosts, role assignments, and absence of
    public VM IP addresses.
+
+  A new isolated deployment should end with no changes or destroys:
+
+  ```output
+  Plan: <count> to add, 0 to change, 0 to destroy.
+  ```
+
+  The count varies with optional features. Public IP resources for Azure
+  Firewall and Bastion are expected; public IPs attached to either jump-host
+  network interface are not.
 
    > **Stop:** Do not apply if the plan contains an unexpected replacement,
    > public endpoint, scope, or region.
@@ -180,6 +207,9 @@ source changes belong in the maintainer workflow.
 - If browser verification reports no login role assignment, populate
   `TF_VAR_browser_host_vm_user_login_principal_ids` or
   `TF_VAR_browser_host_vm_admin_login_principal_ids` and apply again.
+- If Terraform reports `Extra characters after expression` for either browser
+  login principal input, confirm the corresponding `.env` value is a JSON
+  object such as `'{}'`, without an extra layer of quotes.
 - If the portal cannot retrieve the Windows browser jump host password from Key
   Vault, check
   `TF_VAR_browser_host_admin_password_secret_reader_principal_ids` and the Key

@@ -277,7 +277,11 @@ check_dependencies_for() {
     image-integrity)
       case "${1:-}" in
         apply-ratify)
-          check_commands "${context} ${1:-}" az terraform kubectl kubelogin jq envsubst
+          if [[ "${ANYSCALE_EXECUTION_MODE:-workstation}" == "jump-host" ]]; then
+            check_commands "${context} ${1:-}" az kubectl kubelogin jq envsubst
+          else
+            check_commands "${context} ${1:-}" az terraform kubectl kubelogin jq envsubst
+          fi
           ;;
         *)
           check_commands "${context}" az
@@ -582,8 +586,18 @@ doctor() {
   local missing=0
   local command_name
   local doctor_log=""
-  local required_commands=(git az terraform kubectl kubelogin helm jq rsync python3 uv pre-commit curl lsof shellcheck shfmt ruff trivy markdownlint-cli2 yamllint hadolint tflint pyright)
-  local optional_commands=(drawio podman)
+  local execution_mode
+  local -a required_commands optional_commands
+
+  source_env_if_present
+  execution_mode="${ANYSCALE_EXECUTION_MODE:-workstation}"
+  if [[ "${execution_mode}" == "jump-host" ]]; then
+    required_commands=(git az kubectl kubelogin helm jq rsync python3 uv curl lsof podman)
+    optional_commands=(drawio)
+  else
+    required_commands=(git az terraform kubectl kubelogin helm jq rsync python3 uv pre-commit curl lsof shellcheck shfmt ruff trivy markdownlint-cli2 yamllint hadolint tflint pyright)
+    optional_commands=(drawio podman)
+  fi
 
   for command_name in "${required_commands[@]}"; do
     if command -v "${command_name}" >/dev/null 2>&1; then
@@ -624,14 +638,14 @@ doctor() {
     missing=1
   fi
 
-  if [[ -d "${TERRAFORM_DIR}/.terraform" ]]; then
+  if [[ "${execution_mode}" != "jump-host" && -d "${TERRAFORM_DIR}/.terraform" ]]; then
     printf 'ok: terraform initialized\n'
-  else
+  elif [[ "${execution_mode}" != "jump-host" ]]; then
     printf 'missing: terraform initialized\n'
     missing=1
   fi
 
-  if command -v az >/dev/null 2>&1; then
+  if [[ "${execution_mode}" != "jump-host" ]] && command -v az >/dev/null 2>&1; then
     if az extension show --name ssh --only-show-errors >/dev/null 2>&1; then
       printf 'ok: Azure CLI ssh extension (Bastion SSH)\n'
     else
@@ -642,8 +656,6 @@ doctor() {
   fi
 
   printf '\nScenario readiness:\n'
-  source_env_if_present
-  local execution_mode="${ANYSCALE_EXECUTION_MODE:-workstation}"
   printf 'info: execution mode = %s\n' "${execution_mode}"
   if [[ "${execution_mode}" == "jump-host" ]]; then
     if az account show --query user.type -o tsv --only-show-errors 2>/dev/null | grep -q .; then

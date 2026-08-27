@@ -1,0 +1,69 @@
+---
+title: Private AKS components and networking
+config:
+  layout: dagre
+  theme: base
+  flowchart:
+    htmlLabels: true
+    curve: linear
+    nodeSpacing: 45
+    rankSpacing: 70
+  themeVariables:
+    fontFamily: Segoe UI, Arial, sans-serif
+    fontSize: 14px
+---
+flowchart TB
+  OP(["Operator workstation<br/>outside VNet"])
+
+  subgraph VNET["Customer private VNet"]
+    direction TB
+    BAST["AzureBastionSubnet<br/>Azure Bastion"]
+    JUMP["Jump-host subnet<br/>Linux + optional Windows"]
+    DNS["DNS Private Resolver<br/>private DNS zones"]
+    APISUB["Delegated API server subnet<br/>VNet integration"]
+    NODE["AKS node subnet<br/>system / CPU / GPU pools<br/>Anyscale operator + identity<br/>Ray workloads + internal Gateway"]
+    PE["Private endpoint subnet<br/>ADLS / ACR / Key Vault / AMPLS"]
+    FW["Firewall subnet<br/>Azure Firewall + UDR next hop"]
+  end
+
+  subgraph MGMT["Managed external services — outside VNet"]
+    direction TB
+    MCTRL(["AKS control plane<br/>private API"])
+    MDATA(["ADLS Gen2 / ACR<br/>Key Vault / AMPLS"])
+    MANY(["Anyscale cloud<br/>endpoint"])
+  end
+
+  subgraph PUB["Public Internet — outbound only"]
+    direction TB
+    PCON(["Anyscale console<br/>OAuth"])
+    PENTRA(["Microsoft Entra ID<br/>Azure ARM"])
+    PREG(["Approved registries<br/>and updates"])
+  end
+
+  OP --> BAST
+  BAST --> JUMP
+  JUMP --> NODE
+  NODE --> FW
+  JUMP --> FW
+  NODE --> APISUB
+  APISUB --> MCTRL
+  NODE --> PE
+  PE --> MDATA
+  FW --> MANY
+  FW --> PCON
+  FW --> PENTRA
+  FW --> PREG
+  DNS -.-> PE
+  DNS -.-> NODE
+
+  classDef blue fill:#e6f0fb,stroke:#2f6fb0,color:#0b2440,stroke-width:1.2px;
+  classDef green fill:#e7f4ec,stroke:#2e8b57,color:#0b2a1a,stroke-width:1.2px;
+  classDef orange fill:#fdebd8,stroke:#c9741d,color:#3a2408,stroke-width:1.2px;
+  classDef gray fill:#eef0f2,stroke:#7a8390,color:#1e2530,stroke-width:1.2px;
+
+  class OP,BAST,JUMP,NODE,APISUB,DNS blue;
+  class PE,MDATA green;
+  class FW orange;
+  class MCTRL,MANY,PCON,PENTRA,PREG gray;
+
+  linkStyle 13,14 stroke:#0f766e,stroke-width:1.4px,stroke-dasharray:4 4;

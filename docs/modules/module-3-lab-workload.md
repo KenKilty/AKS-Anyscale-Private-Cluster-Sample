@@ -24,11 +24,13 @@ jump host.
   ANYSCALE_HOST=https://console.azure.anyscale.com .venv/bin/anyscale login
   ```
 
-- Any enabled Anyscale control-plane Private Link endpoint is approved, and its
-  private DNS and operator control-plane URL are configured.
+- For a Private Link continuation run, the endpoint approval and operator URL
+  match the current pass in the procedure below.
 - The target subscription has quota for the configured system and CPU VM sizes.
-  The default GPU pool uses `Standard_NC16as_T4_v3`; verify that SKU in the
-  target region and request the corresponding NC-family vCPU quota before
+  CPU nodes must provide more than 4 vCPU and 16 GiB so the baseline Anyscale
+  pod still fits after AKS reservations; the deploy preflight rejects smaller
+  sizes. The default GPU pool uses `Standard_NC16as_T4_v3`; verify that SKU in
+  the target region and request the corresponding NC-family vCPU quota before
   deployment. For a CPU-only lab, set `TF_VAR_gpu_pool_configs='{}'` in `.env`.
 
 ## Configuration
@@ -41,7 +43,7 @@ and Gateway values supplied by `.env-template`. Decide only:
 | CPU or CPU+GPU | `TF_VAR_gpu_pool_configs` | Keep the T4 map only when the region has SKU availability and quota; use `{}` for CPU-only. |
 | Platform access | `TF_VAR_anyscale_platform_default_admin_assignment`, `TF_VAR_anyscale_platform_role_assignments` | The template grants the deploying principal the platform administrator role at subscription scope. Add only reviewed Entra object IDs. |
 | Image Integrity | `TF_VAR_enable_image_integrity` | Keep enabled only when you plan to complete Module 5 and can create policy assignments. Modules 1-4 do not require it. |
-| Control-plane Private Link | `TF_VAR_enable_privatelink`, `TF_VAR_anyscale_privatelink_service_alias`, `TF_VAR_anyscale_platform` | Optional. Anyscale must provide the service alias and approve the Azure private endpoint. Use the two-pass procedure below. |
+| Control-plane Private Link | `TF_VAR_enable_privatelink`, `TF_VAR_anyscale_privatelink_service_alias`, `TF_VAR_anyscale_platform` | Optional. Anyscale must provide the service alias and approve the Azure private endpoint. Use the three-deploy procedure below. |
 
 Leave `ANYSCALE_CLOUD_NAME` and `ANYSCALE_CLOUD_DEPLOYMENT_ID` empty before the
 first deployment. The harness derives the cloud name and writes both values to
@@ -78,15 +80,19 @@ breakdown in [Maintainer Workflows](../maintainer-workflows.md#deploy-stage-refe
 
 If Private Link is enabled, make the first deploy with
 `operator_control_plane_url = null` in `TF_VAR_anyscale_platform`. This creates
-the private endpoint while the operator continues to use the public control
-plane URL. After the endpoint appears as pending:
+the private endpoint, reports its current approval status, and stops before
+Anyscale platform registration. Complete the following three-deploy procedure:
 
 1. Ask Anyscale to approve the cross-tenant private endpoint.
 2. Wait until Azure reports the connection as approved.
-3. Set `operator_control_plane_url` to
+3. Leave `operator_control_plane_url` unset and rerun
+  `./scripts/anyscale-aks.sh module 3 deploy`. This creates the Anyscale cloud
+  while the operator uses the public control plane URL and writes
+  `ANYSCALE_CLOUD_DEPLOYMENT_ID` to `.env`.
+4. Set `operator_control_plane_url` to
   `https://cld-${ANYSCALE_CLOUD_DEPLOYMENT_ID}.${TF_VAR_anyscale_private_dns_zone_name}`.
-4. Rerun `./scripts/anyscale-aks.sh module 3 deploy` from the workstation.
-5. Run the [Private Link DNS proof](browser-access.md#private-link-dns-proof),
+5. Rerun `./scripts/anyscale-aks.sh module 3 deploy` from the workstation.
+6. Run the [Private Link DNS proof](browser-access.md#private-link-dns-proof),
    test HTTPS from inside the VNet, and continue only when both checks pass.
 
 > **Warning:** Do not set the private operator URL before Anyscale approves the

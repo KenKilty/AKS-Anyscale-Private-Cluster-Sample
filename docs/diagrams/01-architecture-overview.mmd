@@ -1,0 +1,55 @@
+---
+title: Simplified whole-solution architecture
+config:
+  layout: dagre
+  theme: base
+  flowchart:
+    htmlLabels: true
+    curve: linear
+    nodeSpacing: 45
+    rankSpacing: 65
+  themeVariables:
+    fontFamily: Segoe UI, Arial, sans-serif
+    fontSize: 14px
+    edgeLabelBackground: "#ffffff"
+---
+flowchart TB
+  OP(["Operator workstation<br/>outside VNet"])
+
+  subgraph VNET["Customer VNet"]
+    direction TB
+    BAST["<b>Private operator access</b><br/>Azure Bastion + jump hosts<br/>no VM public IPs"]
+    AKSCORE["<b>Private AKS</b><br/>private API + node pools<br/>Anyscale operator + Ray<br/>internal Gateway"]
+    PDEP["<b>Private Azure dependencies</b><br/>ADLS Gen2 / ACR / Key Vault<br/>Azure Monitor / AMPLS<br/>via private endpoints"]
+    FW["<b>Controlled connectivity</b><br/>UDR → Azure Firewall<br/>DNS proxy / private resolver"]
+  end
+
+  subgraph EXT["Managed external services"]
+    direction LR
+    ANY(["Anyscale cloud<br/>endpoint"])
+    IDARM(["Entra ID / ARM"])
+    REG(["Approved registries<br/>& updates"])
+    ANY ~~~ IDARM ~~~ REG
+  end
+
+  OP --> BAST
+  BAST --> AKSCORE
+  AKSCORE --> PDEP
+  AKSCORE --> FW
+  BAST --> FW
+  FW --> ANY
+  FW --> IDARM
+  FW --> REG
+  AKSCORE -. "optional Private Link" .-> ANY
+
+  classDef blue fill:#e6f0fb,stroke:#2f6fb0,color:#0b2440,stroke-width:1.2px;
+  classDef green fill:#e7f4ec,stroke:#2e8b57,color:#0b2a1a,stroke-width:1.2px;
+  classDef orange fill:#fdebd8,stroke:#c9741d,color:#3a2408,stroke-width:1.2px;
+  classDef gray fill:#eef0f2,stroke:#7a8390,color:#1e2530,stroke-width:1.2px;
+
+  class OP,BAST,AKSCORE blue;
+  class PDEP green;
+  class FW orange;
+  class ANY,IDARM,REG gray;
+
+  linkStyle 10 stroke:#0f766e,stroke-width:1.6px,stroke-dasharray:5 5;

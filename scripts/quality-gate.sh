@@ -310,14 +310,20 @@ check_trivy() {
     return
   fi
   mkdir -p "${TRIVY_CACHE_DIR}"
-  local skip_dirs=".cache,.git,.terraform,.venv"
+  local skip_dirs=(
+    --skip-dirs ".cache"
+    --skip-dirs ".git"
+    --skip-dirs "**/.terraform"
+    --skip-dirs ".venv"
+    --skip-dirs "**/terraform.tfstate.d"
+  )
   local rc=0
   trivy config --quiet --severity HIGH,CRITICAL --exit-code 1 \
-    --cache-dir "${TRIVY_CACHE_DIR}" --skip-dirs "${skip_dirs}" "${ROOT_DIR}" || rc=1
+    --cache-dir "${TRIVY_CACHE_DIR}" "${skip_dirs[@]}" "${ROOT_DIR}" || rc=1
   trivy fs --quiet --scanners vuln --severity HIGH,CRITICAL --exit-code 1 \
-    --cache-dir "${TRIVY_CACHE_DIR}" --skip-dirs "${skip_dirs}" "${ROOT_DIR}" || rc=1
+    --cache-dir "${TRIVY_CACHE_DIR}" "${skip_dirs[@]}" "${ROOT_DIR}" || rc=1
   trivy fs --quiet --scanners secret --exit-code 1 \
-    --cache-dir "${TRIVY_CACHE_DIR}" --skip-dirs "${skip_dirs}" --skip-files "${ENV_FILE}" "${ROOT_DIR}" || rc=1
+    --cache-dir "${TRIVY_CACHE_DIR}" "${skip_dirs[@]}" --skip-files "${ENV_FILE}" "${ROOT_DIR}" || rc=1
   if [[ ${rc} -eq 0 ]]; then
     pass "trivy (config/vuln/secret, HIGH+CRITICAL)"
   else

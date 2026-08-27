@@ -49,3 +49,10 @@ This repository is an Azure private AKS reference architecture for Anyscale on A
 - After shell or proof changes, run `bash -n` on touched shell scripts and `python3 -m py_compile` on proof scripts.
 - Run `terraform -chdir=infra/terraform fmt -check -recursive` after Terraform changes.
 - For live work, prefer `./scripts/anyscale-aks.sh e2e --custom-image --teardown` once `.env`, Azure CLI auth, Anyscale OAuth, and Terraform init are available.
+
+<!-- mermaid-ai-skills:start -->
+## Mermaid Diagrams
+
+When the user asks to create, edit, or visualize a diagram, follow the
+instructions in `.github/instructions/mermaid.instructions.md`.
+<!-- mermaid-ai-skills:end -->

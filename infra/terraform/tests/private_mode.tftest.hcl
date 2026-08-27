@@ -275,8 +275,8 @@ run "private_aks_and_egress_contract" {
   }
 
   assert {
-    condition     = output.private_mode_validation.container_insights.container_log_v2_enabled == true && contains(output.private_mode_validation.container_insights.streams, "Microsoft-ContainerLogV2") && output.private_mode_validation.container_insights.ampls_enabled == true && output.private_mode_validation.container_insights.config_dce_public_network_access == false
-    error_message = "Container Insights must explicitly enable ContainerLogV2 and use a private configuration DCE with AMPLS."
+    condition     = output.private_mode_validation.container_insights.container_log_v2_enabled == true && contains(output.private_mode_validation.container_insights.streams, "Microsoft-ContainerLogV2") && output.private_mode_validation.container_insights.ampls_enabled == true && output.private_mode_validation.container_insights.config_dce_public_network_access == false && output.private_mode_validation.container_insights.publisher_role_definition_name == "Monitoring Metrics Publisher"
+    error_message = "Container Insights must explicitly enable ContainerLogV2, use a private configuration DCE with AMPLS, and authorize the AKS managed identity to publish at cluster scope."
   }
 
   assert {

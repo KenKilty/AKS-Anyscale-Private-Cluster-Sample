@@ -519,7 +519,7 @@ variable "anyscale_platform" {
   }
 
   validation {
-    condition     = var.anyscale_platform.operator_control_plane_url == null || can(regex("^https://[A-Za-z0-9.-]+(:[0-9]+)?(/.*)?$", var.anyscale_platform.operator_control_plane_url))
+    condition     = var.anyscale_platform.operator_control_plane_url == null || can(regex("^https://[A-Za-z0-9._-]+(:[0-9]+)?(/.*)?$", var.anyscale_platform.operator_control_plane_url))
     error_message = "anyscale_platform.operator_control_plane_url must be an https:// URL when set. Point it at the cloud-specific Private Link host (https://cld-<cloud-resource-id>.<zone>), not the public console."
   }
 

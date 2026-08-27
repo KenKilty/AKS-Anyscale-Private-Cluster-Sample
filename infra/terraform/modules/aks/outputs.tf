@@ -66,6 +66,7 @@ output "container_insights" {
     dcr_id                           = azurerm_monitor_data_collection_rule.container_insights.id
     dcr_name                         = azurerm_monitor_data_collection_rule.container_insights.name
     association_name                 = azurerm_monitor_data_collection_rule_association.container_insights.name
+    publisher_role_definition_name   = azurerm_role_assignment.container_insights_publisher.role_definition_name
     streams                          = local.container_insights_streams
     container_log_v2_enabled         = var.container_insights_v2_enabled
     data_collection_interval         = var.container_insights_data_collection_interval

@@ -220,14 +220,36 @@ Cleanup is opt-in:
 
 ## Diagram Export
 
-`docs/architecture-overview.drawio` is the editable overview source. Export its
-checked-in SVG with the dispatcher:
+The three architecture views are authored in Mermaid. Their canonical sources
+are the `.mmd` files under `docs/diagrams/`, and the checked-in `.drawio` files
+remain as alternate editable sources:
+
+| Canonical source | Rendered SVG | Rendered PNG |
+| --- | --- | --- |
+| `docs/diagrams/01-architecture-overview.mmd` | `docs/architecture-overview.svg` | `docs/diagrams/01-architecture-overview.drawio.png` |
+| `docs/diagrams/06-aks-networking.mmd` | `docs/diagrams/06-aks-networking.svg` | `docs/diagrams/06-aks-networking.drawio.png` |
+| `docs/diagrams/07-anyscale-components.mmd` | `docs/diagrams/07-anyscale-components.svg` | `docs/diagrams/07-anyscale-components.drawio.png` |
+
+Regenerate the SVGs and PNGs with the Mermaid CLI (`mmdc`, tested with 11.16.0)
+from the `docs/` directory:
+
+```bash
+cd docs
+# 01 renders to the top-level overview SVG used by the README and summary.
+mmdc -i diagrams/01-architecture-overview.mmd -o architecture-overview.svg -b white
+mmdc -i diagrams/01-architecture-overview.mmd -o diagrams/01-architecture-overview.drawio.png -b white -w 1800 -s 3
+for name in 06-aks-networking 07-anyscale-components; do
+  mmdc -i "diagrams/${name}.mmd" -o "diagrams/${name}.svg" -b white
+  mmdc -i "diagrams/${name}.mmd" -o "diagrams/${name}.drawio.png" -b white -w 1800 -s 3
+done
+```
+
+The remaining draw.io diagrams under `docs/diagrams/` still export through the
+dispatcher:
 
 ```bash
 ./scripts/anyscale-aks.sh diagrams export
 ```
-
-The additional diagram sources and PNG exports live under `docs/diagrams/`.
 
 ## Generated Artifacts
 

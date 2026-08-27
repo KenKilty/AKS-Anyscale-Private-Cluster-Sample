@@ -194,3 +194,32 @@ run "existing_identity_external_rbac_contract" {
     error_message = "existing-external-rbac must still publish the expected Storage Blob Data Contributor container-scope RBAC contract."
   }
 }
+
+run "jump_host_role_assignment_replication_contract" {
+  command = plan
+
+  variables {
+    acr_push_principal_ids = {
+      jump_host = "55555555-5555-5555-5555-555555555555"
+      user      = "66666666-6666-6666-6666-666666666666"
+    }
+    aks_cluster_admin_principal_ids = {
+      jump_host = "55555555-5555-5555-5555-555555555555"
+      user      = "66666666-6666-6666-6666-666666666666"
+    }
+    aks_cluster_user_principal_ids = {
+      jump_host = "55555555-5555-5555-5555-555555555555"
+      user      = "66666666-6666-6666-6666-666666666666"
+    }
+  }
+
+  assert {
+    condition     = azurerm_role_assignment.acr_push["jump_host"].principal_type == "ServicePrincipal" && azurerm_role_assignment.acr_push["jump_host"].skip_service_principal_aad_check == true
+    error_message = "The jump-host AcrPush assignment must tolerate Entra replication delay."
+  }
+
+  assert {
+    condition     = azurerm_role_assignment.acr_push["user"].skip_service_principal_aad_check == false
+    error_message = "User and group AcrPush assignments must retain AzureRM principal discovery."
+  }
+}

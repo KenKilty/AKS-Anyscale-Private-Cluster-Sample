@@ -80,20 +80,26 @@ This repository focuses on the AKS workload landing zone and the Anyscale on Azu
 
 ## Architecture
 
-The overview shows the full validated lifecycle: the private Azure foundation, private AKS data plane, Anyscale on Azure control-plane integration, workload proof path, and the drain-before-delete cleanup path.
+The overview shows the simplified whole solution: operator access, the private
+AKS data plane, private Azure dependencies, controlled egress, and the managed
+external services outside the virtual network.
 
 ![High-level architecture](docs/architecture-overview.svg)
 
-The overview is intentionally high level. Editable draw.io sources and rendered
-PNGs provide the detailed views:
+The [architecture landing page](docs/architecture.md) holds the high-level view,
+a security feature and purpose table, and the two detailed views. The overview is
+intentionally high level. Editable draw.io sources and rendered images provide
+the detailed views:
 
 | View | Editable source | Rendered image |
 | --- | --- | --- |
-| Architecture overview | [01-architecture-overview.drawio](docs/diagrams/01-architecture-overview.drawio) | [PNG](docs/diagrams/01-architecture-overview.drawio.png) |
+| Architecture overview | [01-architecture-overview.mmd](docs/diagrams/01-architecture-overview.mmd) (alt: [.drawio](docs/diagrams/01-architecture-overview.drawio)) | [SVG](docs/architecture-overview.svg) |
 | Deployment sequence | [02-deployment-sequence.drawio](docs/diagrams/02-deployment-sequence.drawio) | [PNG](docs/diagrams/02-deployment-sequence.drawio.png) |
 | Private data plane and TLS | [03-private-data-plane.drawio](docs/diagrams/03-private-data-plane.drawio) | [PNG](docs/diagrams/03-private-data-plane.drawio.png) |
 | Operator access paths | [04-operator-access.drawio](docs/diagrams/04-operator-access.drawio) | [PNG](docs/diagrams/04-operator-access.drawio.png) |
 | Guided module flow | [05-module-flow.drawio](docs/diagrams/05-module-flow.drawio) | [PNG](docs/diagrams/05-module-flow.drawio.png) |
+| AKS components and networking | [06-aks-networking.mmd](docs/diagrams/06-aks-networking.mmd) (alt: [.drawio](docs/diagrams/06-aks-networking.drawio)) | [SVG](docs/diagrams/06-aks-networking.svg) |
+| Anyscale platform components | [07-anyscale-components.mmd](docs/diagrams/07-anyscale-components.mmd) (alt: [.drawio](docs/diagrams/07-anyscale-components.drawio)) | [SVG](docs/diagrams/07-anyscale-components.svg) |
 
 The section-specific Mermaid views below summarize deployment sequencing,
 private Gateway traffic, and operator access paths.

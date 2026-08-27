@@ -29,6 +29,14 @@ maintainer commands are in [Maintainer Workflows](maintainer-workflows.md).
 - Terraform runs from the operator workstation. The Linux jump host owns
   private post-configuration, image build and push, and proof submission that
   requires private storage DNS.
+- Ray cluster authentication is owned by the Anyscale platform. Ray token
+  authentication (`RAY_AUTH_MODE=token`) targets self-managed Ray such as
+  `ray start`, `ray up`, and KubeRay; this sample runs no self-managed Ray, so
+  the variable is intentionally unset. Browser access to a workspace or Ray
+  dashboard goes through the Anyscale `cluster_auth` relay. The direct
+  `head open` dashboard fallback bypasses that relay, and its boundary is the
+  private AKS API, Entra-backed Kubernetes RBAC, and a localhost-only
+  port-forward rather than a Ray-layer token.
 
 Reference architecture sources:
 
@@ -37,6 +45,7 @@ Reference architecture sources:
 - [Anyscale on Azure identity and access](https://learn.microsoft.com/azure/anyscale-on-azure/identity-access)
 - [AKS private clusters](https://learn.microsoft.com/azure/aks/private-clusters)
 - [AKS outbound traffic through Azure Firewall](https://learn.microsoft.com/azure/aks/limit-egress-traffic)
+- [Ray token authentication](https://docs.ray.io/en/latest/ray-security/token-auth.html)
 
 ## Input Contract
 
@@ -204,7 +213,8 @@ The `.env-template` firewall lists are the maintained starting point:
   and
   `prod-registry-k8s-io-ap-southeast-1.s3.dualstack.ap-southeast-1.amazonaws.com`.
 - `tool_bootstrap_fqdns`: `packages.microsoft.com`, `aka.ms`,
-  `azurecliprod.blob.core.windows.net`, `azure.archive.ubuntu.com`,
+  `azurecliprod.blob.core.windows.net`, `azcliprod.blob.core.windows.net`,
+  `azcliextensionsync.blob.core.windows.net`, `azure.archive.ubuntu.com`,
   `security.ubuntu.com`, `apt.releases.hashicorp.com`, `dl.k8s.io`,
   `cdn.dl.k8s.io`, `get.helm.sh`, `astral.sh`, `releases.astral.sh`,
   `pypi.org`, `files.pythonhosted.org`, `github.com`, `api.github.com`,
@@ -331,7 +341,8 @@ The custom image packages `onnxruntime==1.22.0` into the configured Anyscale Ray
 base image. Podman builds `linux/amd64` on the Linux jump host and pushes to the
 private ACR. The image URI and Ray version are passed explicitly when updating
 workspaces and submitting jobs or services. The private ACR path does not use
-`az acr build`.
+`az acr build`. `ANYSCALE_STANDARD_IMAGE_URI` selects the image restored to CPU
+workspaces when custom-image mode is disabled.
 
 The SBOM path uses Syft and ORAS. The signing path uses Notation with the Azure
 Key Vault plugin. Image integrity uses Ratify identity/RBAC, trust-policy

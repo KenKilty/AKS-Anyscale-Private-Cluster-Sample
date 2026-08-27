@@ -393,7 +393,8 @@ load_env() {
     ANYSCALE_CUSTOM_IMAGE_RAY_VERSION \
     ANYSCALE_CUSTOM_IMAGE_REQUIREMENT \
     ANYSCALE_CUSTOM_IMAGE_BUILD_MODE \
-    ANYSCALE_CUSTOM_IMAGE_URI; do
+    ANYSCALE_CUSTOM_IMAGE_URI \
+    ANYSCALE_STANDARD_IMAGE_URI; do
     if [[ ${!custom_image_name+x} ]]; then
       preserved_custom_image_names+=("${custom_image_name}")
       preserved_custom_image_values+=("${!custom_image_name}")
@@ -444,9 +445,10 @@ load_env() {
   ANYSCALE_CUSTOM_IMAGE_REQUIREMENT="${ANYSCALE_CUSTOM_IMAGE_REQUIREMENT:-onnxruntime==1.22.0}"
   ANYSCALE_CUSTOM_IMAGE_BUILD_MODE="${ANYSCALE_CUSTOM_IMAGE_BUILD_MODE:-podman}"
   ANYSCALE_CUSTOM_IMAGE_URI="${ANYSCALE_CUSTOM_IMAGE_URI:-}"
+  ANYSCALE_STANDARD_IMAGE_URI="${ANYSCALE_STANDARD_IMAGE_URI:-anyscale/ray:2.55.1-py311}"
   export ANYSCALE_CUSTOM_IMAGE_ENABLED ANYSCALE_CUSTOM_IMAGE_REPOSITORY ANYSCALE_CUSTOM_IMAGE_TAG
   export ANYSCALE_CUSTOM_IMAGE_RAY_VERSION ANYSCALE_CUSTOM_IMAGE_REQUIREMENT ANYSCALE_CUSTOM_IMAGE_BUILD_MODE
-  export ANYSCALE_CUSTOM_IMAGE_URI
+  export ANYSCALE_CUSTOM_IMAGE_URI ANYSCALE_STANDARD_IMAGE_URI
 
   # Image signing (Notation + Key Vault) / AKS Image Integrity defaults. These
   # mirror the Terraform variables image_signing_cert_name / _subject.
@@ -3064,6 +3066,35 @@ ensure_azure_cli_login() {
   die "Azure CLI login is required. Run: ${login_command}"
 }
 
+validate_cpu_vm_size() {
+  local size="${TF_VAR_cpu_vm_size}"
+  local region="${TF_VAR_azure_location}"
+  local capabilities vcpus memory_gb
+
+  capabilities="$(az vm list-skus \
+    --location "${region}" \
+    --resource-type virtualMachines \
+    --all \
+    --query "[?name=='${size}'] | [0].{restrictions: restrictions, capabilities: capabilities}" \
+    --output json \
+    --only-show-errors)"
+
+  if [[ "${capabilities}" == "null" ]] || jq -e '.restrictions | length > 0' <<<"${capabilities}" >/dev/null; then
+    die "CPU workload VM size '${size}' is not available in ${region} for this subscription."
+  fi
+
+  vcpus="$(jq -r '.capabilities[] | select(.name == "vCPUs") | .value' <<<"${capabilities}")"
+  memory_gb="$(jq -r '.capabilities[] | select(.name == "MemoryGB") | .value' <<<"${capabilities}")"
+  if [[ -z "${vcpus}" || -z "${memory_gb}" ]]; then
+    die "Azure did not report CPU and memory capabilities for CPU workload VM size '${size}'."
+  fi
+
+  if ! jq -en --argjson vcpus "${vcpus}" --argjson memory_gb "${memory_gb}" \
+    '$vcpus > 4 and $memory_gb > 16' >/dev/null; then
+    die "CPU workload VM size '${size}' provides ${vcpus} vCPU and ${memory_gb} GiB. Choose a larger size so an Anyscale pod requesting 4 CPU and 16 GiB fits after AKS reservations."
+  fi
+}
+
 ###############################################################################
 preflight() {
   log "Checking required CLI tools..."
@@ -3077,6 +3108,7 @@ preflight() {
   sub_id="${TF_VAR_azure_subscription_id}"
   log "Setting active subscription to ${sub_id}"
   az account set --subscription "${sub_id}" --only-show-errors
+  validate_cpu_vm_size
   ensure_aks_app_routing_gateway_api
 }
 
@@ -3590,6 +3622,8 @@ invoke_jump_host_bootstrap() {
 
   local ssh_base_opts="-p ${jh_port} -i ${ssh_key} -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=${known_hosts_file} -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=2"
   local ssh_target="${admin_user}@127.0.0.1"
+  local remote_subscription
+  printf -v remote_subscription '%q' "${TF_VAR_azure_subscription_id}"
 
   # Ensure canonical path exists and is owned by the admin user. Bastion-backed
   # SSH can briefly report connection-refused while the tunnel is still warming.
@@ -3623,24 +3657,32 @@ invoke_jump_host_bootstrap() {
     "${ssh_target}:${canonical_repo_path}/"
 
   if [[ -f "${ROOT_DIR}/.env" ]]; then
-    log "Copying .env to jump host ..."
+    log "Copying .env and forcing jump-host execution mode on the VM..."
     rsync -az \
       -e "ssh ${ssh_base_opts}" \
       "${ROOT_DIR}/.env" \
       "${ssh_target}:${canonical_repo_path}/.env"
+    # shellcheck disable=SC2029
+    ssh ${ssh_base_opts} "${ssh_target}" \
+      "grep -q '^ANYSCALE_EXECUTION_MODE=' '${canonical_repo_path}/.env' \
+        && sed -i 's/^ANYSCALE_EXECUTION_MODE=.*/ANYSCALE_EXECUTION_MODE=jump-host/' '${canonical_repo_path}/.env' \
+        || printf '\nANYSCALE_EXECUTION_MODE=jump-host\n' >> '${canonical_repo_path}/.env'"
   fi
 
   log "Ensuring jump host operator tooling is present..."
   # shellcheck disable=SC2029
   ssh ${ssh_base_opts} "${ssh_target}" \
-    "cd '${canonical_repo_path}' \
+    "export TF_VAR_azure_subscription_id=${remote_subscription} \
+     && cd '${canonical_repo_path}' \
      && if ! command -v az >/dev/null 2>&1 \
         || ! command -v kubectl >/dev/null 2>&1 \
         || ! command -v kubelogin >/dev/null 2>&1 \
         || ! command -v helm >/dev/null 2>&1; then \
           bash scripts/bootstrap-jump-host.sh; \
-        elif ! az account show --only-show-errors >/dev/null 2>&1; then \
-          az login --identity --only-show-errors >/dev/null; \
+        fi \
+     && if ! az account set --subscription \"\${TF_VAR_azure_subscription_id}\" --only-show-errors >/dev/null 2>&1; then \
+          az login --identity --only-show-errors >/dev/null \
+          && az account set --subscription \"\${TF_VAR_azure_subscription_id}\" --only-show-errors >/dev/null; \
         fi"
 
   # ---- Invoke bootstrap-k8s.sh on the jump host via piped bash script ------
@@ -3775,6 +3817,43 @@ deploy_health_stage() {
   health
 }
 
+privatelink_first_pass_requires_stop() {
+  load_env
+  [[ "${TF_VAR_enable_privatelink:-false}" == "true" ]] || return 1
+
+  local platform_config operator_control_plane_url endpoint_id connection_status cloud_deployment_id
+  platform_config="${TF_VAR_anyscale_platform:-}"
+  [[ -n "${platform_config}" ]] || platform_config='{}'
+  operator_control_plane_url="$(jq -r '.operator_control_plane_url // empty' <<<"${platform_config}")" ||
+    die "TF_VAR_anyscale_platform must be valid JSON."
+  [[ -z "${operator_control_plane_url}" ]] || return 1
+
+  endpoint_id="$(terraform_output_json anyscale_privatelink | jq -r '.endpoint_id // empty')" ||
+    die "Could not read the Private Link foundation output."
+  [[ -n "${endpoint_id}" ]] || die "Private Link is enabled, but the foundation output has no private endpoint ID."
+  connection_status="$(az network private-endpoint show \
+    --ids "${endpoint_id}" \
+    --query 'manualPrivateLinkServiceConnections[0].privateLinkServiceConnectionState.status' \
+    --output tsv \
+    --only-show-errors)"
+
+  if [[ "${connection_status}" != "Approved" ]]; then
+    log "Private Link first pass complete. Connection status: ${connection_status:-Unknown}."
+    log "Stopping before Anyscale platform registration. Ask Anyscale to approve the endpoint, then rerun deploy with anyscale_platform.operator_control_plane_url still unset."
+    return 0
+  fi
+
+  cloud_deployment_id="$(terraform_output_raw anyscale_cloud_deployment_id 2>/dev/null || true)"
+  if [[ -z "${cloud_deployment_id}" || "${cloud_deployment_id}" == "null" ]]; then
+    log "Private Link is approved. Continuing with public operator access to create the Anyscale cloud deployment ID."
+    return 1
+  fi
+
+  log "Private Link is approved and the Anyscale cloud deployment ID is available."
+  log "Stopping before reconciliation. Set anyscale_platform.operator_control_plane_url to the cloud-specific private URL, then rerun deploy."
+  return 0
+}
+
 deploy() {
   DEPLOY_FROM_SCRATCH=false
   DEPLOY_FORCE_YES=false
@@ -3817,6 +3896,10 @@ USAGE
   run_stage "reset-or-state" deploy_reset_stage
   run_stage "terraform-init-validate" deploy_init_validate_stage
   run_stage "foundation" deploy_foundation_stage
+  if privatelink_first_pass_requires_stop; then
+    setup_run_summary
+    return 0
+  fi
   run_stage "bootstrap-a" deploy_bootstrap_a_stage
   run_stage "platform" deploy_platform_stage
   run_stage "bootstrap-b" deploy_bootstrap_b_stage
@@ -4638,7 +4721,7 @@ control_plane_egress_smoke() {
   hosts_json="${TF_VAR_anyscale_fqdns:-[]}"
   while IFS= read -r host; do
     [[ -n "${host}" ]] && hosts+=("${host}")
-  done < <(jq -r '(. + ["console.anyscale.com", "console.azure.anyscale.com", "api.anyscale.com"]) | unique[]' <<<"${hosts_json}")
+  done < <(jq -r '(. + ["console.azure.anyscale.com"]) | unique[]' <<<"${hosts_json}")
 
   hosts_env=""
   for host in "${hosts[@]}"; do
@@ -4665,7 +4748,7 @@ spec:
         effect: NoSchedule
       containers:
       - name: control-plane-egress
-        image: curlimages/curl:8.11.1
+        image: mcr.microsoft.com/azure-cli:2.74.0
         env:
         - name: HOSTS
           value: "${hosts_env}"
@@ -4675,7 +4758,7 @@ spec:
           set -eu
           for host in \${HOSTS}; do
             echo "== resolving \${host} =="
-            nslookup "\${host}"
+            getent hosts "\${host}"
             echo "== probing https://\${host}/ =="
             code="\$(curl -k -sS -o /dev/null -w '%{http_code}' --connect-timeout 20 --max-time 60 "https://\${host}/")"
             case "\${code}" in
@@ -4739,7 +4822,7 @@ spec:
         effect: NoSchedule
       containers:
       - name: dns-egress
-        image: curlimages/curl:8.11.1
+        image: mcr.microsoft.com/azure-cli:2.74.0
         command: ["/bin/sh", "-c"]
         args:
         - |
@@ -4754,20 +4837,16 @@ spec:
             ${region}.handler.control.monitor.azure.com \
             ${workspace_customer_id}.ods.opinsights.azure.com \
             ${workspace_customer_id}.oms.opinsights.azure.com \
-            api.anyscale.com \
-            console.azure.anyscale.com \
-            console.anyscale.com; do
+            console.azure.anyscale.com; do
             echo "== resolving \${host} =="
-            nslookup "\${host}"
+            getent hosts "\${host}"
           done
           for url in \
             https://${storage_account}.blob.core.windows.net/ \
             https://arcmktplaceprod.azurecr.io/v2/ \
             https://global.handler.control.monitor.azure.com/ \
             https://${workspace_customer_id}.ods.opinsights.azure.com/ \
-            https://api.anyscale.com/ \
-            https://console.azure.anyscale.com/ \
-            https://console.anyscale.com/; do
+            https://console.azure.anyscale.com/; do
             echo "== probing \${url} =="
             code="\$(curl -k -sS -o /dev/null -w '%{http_code}' --connect-timeout 20 --max-time 60 "\${url}")"
             case "\${code}" in
@@ -5085,8 +5164,10 @@ spec:
         effect: NoSchedule
       containers:
       - name: echo
-        image: registry.k8s.io/e2e-test-images/agnhost:2.45
-        args: ["netexec", "--http-port=8080"]
+        image: mcr.microsoft.com/azure-cli:2.74.0
+        command: ["/bin/sh", "-c"]
+        args:
+        - mkdir -p /tmp/www && printf 'GATEWAY_OK\n' >/tmp/www/echo && python3 -m http.server 8080 --directory /tmp/www
         ports:
         - containerPort: 8080
 ---
@@ -5151,7 +5232,7 @@ spec:
         effect: NoSchedule
       containers:
       - name: curl
-        image: curlimages/curl:8.11.1
+        image: mcr.microsoft.com/azure-cli:2.74.0
         command: ["/bin/sh", "-c"]
         args:
         - |
@@ -5340,7 +5421,9 @@ validate_observability() {
   container_json="$(az monitor log-analytics query --workspace "${workspace_customer_id}" --analytics-query "${container_query}" --output json --only-show-errors)"
   jq . <<<"${container_json}"
   container_rows="$(jq -r 'def n: tonumber? // 0; if type == "array" then (.[0].Records? | n) else (.tables[0].rows[0][0] | n) end' <<<"${container_json}")"
-  [[ "${container_rows}" =~ ^[0-9]+$ && "${container_rows}" -gt 0 ]] || die "ContainerLogV2 has no records yet. Run this again after Azure Monitor ingestion catches up."
+  if [[ ! "${container_rows}" =~ ^[0-9]+$ || "${container_rows}" -eq 0 ]]; then
+    die "ContainerLogV2 has no records. Allow at least 15 minutes after enabling Container Insights, then inspect ama-logs mdsd.qos. A MaODSRequest HTTP 403 after private DNS, DCR/DCE, AMPLS membership, local authentication, and monitoring identity checks pass is an Azure Monitor ODS service-side rejection; capture the agent diagnostics and escalate to Azure support."
+  fi
 
   diagnostic_settings_count="$(terraform output -json private_mode_validation 2>/dev/null |
     jq -r '[.. | objects | .diagnostic_settings_enabled? // empty | select(. == true)] | length' 2>/dev/null || true)"
@@ -5414,7 +5497,11 @@ USAGE
     fi
     run_focused_validation_check "app-routing-gateway" "app-routing Gateway private reachability" validate_app_routing_gateway || true
     run_focused_validation_check "gateway-tls-lifecycle" "Anyscale Gateway TLS lifecycle" validate_gateway_tls_lifecycle || true
-    run_focused_validation_check "gpu-smoke" "GPU scheduling and nvidia-smi" validate_gpu || true
+    if gpu_workloads_enabled; then
+      run_focused_validation_check "gpu-smoke" "GPU scheduling and nvidia-smi" validate_gpu || true
+    else
+      skip_focused_validation_check "gpu-smoke" "GPU scheduling and nvidia-smi" "skipped because no GPU node pool is configured"
+    fi
   else
     skip_focused_validation_check "private-dns-egress" "private DNS and control-plane egress" "skipped because validation namespace setup failed"
     skip_focused_validation_check "workload-identity-storage" "workload identity storage access" "skipped because validation namespace setup failed"
@@ -6322,11 +6409,19 @@ anyscale_workspaces_register() {
     local workspace_lifecycle_timeout="${SETUP_TIMEOUT_ANYSCALE_WORKSPACE_WAIT_SECONDS}"
     local -a update_cmd create_cmd
 
-    target_image_uri=""
+    # When the custom image is disabled the target is the standard Anyscale image
+    # so an existing workspace persisted on a custom image is reconciled back to it.
+    # The standard image is CPU-only, so it is forced only on the CPU workspace;
+    # the GPU workspace keeps its compute-config default (CUDA) image because no
+    # canonical standard GPU image is defined here.
     target_ray_version=""
     if custom_image_enabled; then
       target_image_uri="$(custom_image_uri)"
       target_ray_version="${ANYSCALE_CUSTOM_IMAGE_RAY_VERSION}"
+    elif [[ "${workspace_name}" == "${cpu_workspace_name}" ]]; then
+      target_image_uri="${ANYSCALE_STANDARD_IMAGE_URI}"
+    else
+      target_image_uri=""
     fi
 
     create_status=0
@@ -6381,7 +6476,8 @@ anyscale_workspaces_register() {
         write_anyscale_workspace_update_file "${workspace_json}" "${workspace_update_file}" "${compute_config_name}"
         update_cmd=("${cli_bin}" workspace_v2 update "${workspace_id}" -f "${workspace_update_file}" --compute-config "${compute_config_name}")
         if [[ -n "${target_image_uri}" ]]; then
-          update_cmd+=(--image-uri "${target_image_uri}" --ray-version "${target_ray_version}")
+          update_cmd+=(--image-uri "${target_image_uri}")
+          [[ -n "${target_ray_version}" ]] && update_cmd+=(--ray-version "${target_ray_version}")
         fi
         if ! update_output="$(run_with_timeout "${workspace_lifecycle_timeout}" "${update_cmd[@]}" 2>&1)"; then
           printf '%s\n' "${update_output}" | tee "${update_log}"
@@ -6395,7 +6491,8 @@ anyscale_workspaces_register() {
     log "Creating workspace ${workspace_name} with compute config ${compute_config_name}"
     create_cmd=("${cli_bin}" workspace_v2 create --name "${workspace_name}" --compute-config "${compute_config_name}" --cloud "${ANYSCALE_CLOUD_NAME}")
     if [[ -n "${target_image_uri}" ]]; then
-      create_cmd+=(--image-uri "${target_image_uri}" --ray-version "${target_ray_version}")
+      create_cmd+=(--image-uri "${target_image_uri}")
+      [[ -n "${target_ray_version}" ]] && create_cmd+=(--ray-version "${target_ray_version}")
     fi
     if ! create_output="$(run_with_timeout "${workspace_lifecycle_timeout}" "${create_cmd[@]}" 2>&1)"; then
       create_status=$?
@@ -6552,12 +6649,21 @@ custom_image_uri() {
 }
 
 custom_image_acr_name() {
+  # An explicit image URI is authoritative: the DNS preflight must check the same
+  # registry the image is pushed to, including any ACR suffix. Extract the
+  # registry host (before the first "/") and the ACR name (before the first ".").
+  local acr_login_server derived registry_host
+  if [[ -n "${ANYSCALE_CUSTOM_IMAGE_URI:-}" ]]; then
+    registry_host="${ANYSCALE_CUSTOM_IMAGE_URI%%/*}"
+    printf '%s\n' "${registry_host%%.*}"
+    return 0
+  fi
+
   # Prefer the Terraform output when local state is available (workstation).
   # Fall back to the deterministic name derived from TF_VAR_* env vars so the
   # build can run on the in-VNet jump host, which has no local Terraform state
   # (mirrors resource_group_name and Terraform local.names.acr =
   # substr("cr<project><environment><region_short>", 0, 50)).
-  local acr_login_server derived
   acr_login_server="$(terraform output -raw acr_login_server 2>/dev/null || true)"
   if [[ -n "${acr_login_server}" ]]; then
     printf '%s\n' "${acr_login_server%%.*}"
@@ -6772,14 +6878,17 @@ custom_image_runtime_flags() {
 signing_key_vault_name() {
   # Prefer the Terraform output (workstation). Fall back to the deterministic
   # name derived from TF_VAR_* so signing works on the jump host, which has no
-  # local Terraform state (mirrors local.names.key_vault = substr(kv-<suffix>, 0, 24)).
-  local from_tf derived
+  # local Terraform state (mirrors local.names.key_vault =
+  # substr("kv-<suffix>" + (global_name_suffix ? "-<global>" : ""), 0, 24)).
+  local from_tf derived global
   from_tf="$(terraform output -raw key_vault_name 2>/dev/null || true)"
   if [[ -n "${from_tf}" ]]; then
     printf '%s\n' "${from_tf}"
     return 0
   fi
-  derived="kv-${TF_VAR_project}-${TF_VAR_environment}-${TF_VAR_region_short}"
+  global=""
+  [[ -n "${TF_VAR_global_name_suffix:-}" ]] && global="-${TF_VAR_global_name_suffix}"
+  derived="kv-${TF_VAR_project}-${TF_VAR_environment}-${TF_VAR_region_short}${global}"
   printf '%s\n' "${derived:0:24}"
 }
 
@@ -7821,7 +7930,7 @@ EOF
     "${cli_bin}" job status \
     --name "${job_name}" \
     --cloud "${ANYSCALE_CLOUD_NAME}" \
-    --json \
+    --output json \
     --verbose \
     --include-archived \
     >"${status_log}" 2>&1 || true
@@ -7994,7 +8103,7 @@ wait_for_anyscale_service_ready() {
       "${cli_bin}" service status \
       --name "${service_name}" \
       --cloud "${cloud_name}" \
-      --json \
+      --output json \
       --verbose \
       >"${tmp_status_log}" 2>&1; then
       mv "${tmp_status_log}" "${status_log}"
@@ -8062,7 +8171,7 @@ wait_for_anyscale_service_terminated() {
       "${cli_bin}" service status \
       --name "${service_name}" \
       --cloud "${cloud_name}" \
-      --json \
+      --output json \
       --verbose \
       >"${tmp_status_log}" 2>&1; then
       mv "${tmp_status_log}" "${status_log}"
@@ -8106,7 +8215,7 @@ terminate_anyscale_service_if_present() {
     "${cli_bin}" service status \
     --name "${service_name}" \
     --cloud "${cloud_name}" \
-    --json \
+    --output json \
     --verbose \
     >"${status_log}" 2>&1; then
     return 0
@@ -8808,9 +8917,9 @@ USAGE
       ;;
     all)
       workload_pipeline_preflight
-      WORKLOAD_BUILD_JOB_NAME="$(workload_name_with_run_suffix "${WORKLOAD_BUILD_JOB_BASENAME}")"
       if gpu_workloads_enabled; then
         setup_run_init "workload-all" 6
+        WORKLOAD_BUILD_JOB_NAME="$(workload_name_with_run_suffix "${WORKLOAD_BUILD_JOB_BASENAME}")"
         WORKLOAD_TRAIN_JOB_NAME="$(workload_name_with_run_suffix "${WORKLOAD_TRAIN_JOB_BASENAME}")"
         WORKLOAD_SERVICE_NAME="$(workload_name_with_run_suffix "${WORKLOAD_SERVICE_BASENAME}")"
         run_stage "prepare" workload_prepare_stage
@@ -8821,6 +8930,7 @@ USAGE
         run_stage "serve-service-proof" workload_service_stage
       else
         setup_run_init "workload-all" 3
+        WORKLOAD_BUILD_JOB_NAME="$(workload_name_with_run_suffix "${WORKLOAD_BUILD_JOB_BASENAME}")"
         run_stage "prepare" workload_prepare_stage
         run_stage "cpu-proof" workload_cpu_stage
         run_stage "build-job-proof" workload_build_stage
@@ -9009,6 +9119,25 @@ teardown_std_drain() {
   force_teardown_drain_anyscale_cloud
 }
 
+ensure_browser_vm_running_for_destroy() {
+  local vm_id power_state
+  vm_id="$(terraform_output_raw browser_jump_host_vm_id 2>/dev/null || true)"
+  [[ -n "${vm_id}" && "${vm_id}" != "null" ]] || return 0
+
+  power_state="$(az vm get-instance-view \
+    --ids "${vm_id}" \
+    --query "instanceView.statuses[?starts_with(code, 'PowerState/')].code | [0]" \
+    --output tsv \
+    --only-show-errors 2>/dev/null || true)"
+  case "${power_state}" in
+    PowerState/stopped | PowerState/deallocated)
+      log "Starting the browser jump-host VM so Azure can remove AADLoginForWindows during destroy."
+      run_with_timeout "${SETUP_TIMEOUT_AZURE_COMMAND_SECONDS}" \
+        az vm start --ids "${vm_id}" --only-show-errors
+      ;;
+  esac
+}
+
 teardown_std_terraform_destroy() {
   local terraform_exit_code=0 attempt
   local exitcode_file="${SETUP_RUN_DIR}/terraform-destroy.exitcode"
@@ -9016,6 +9145,7 @@ teardown_std_terraform_destroy() {
   local max_attempts="${SETUP_TERRAFORM_DESTROY_RETRY_ATTEMPTS:-3}"
   local delay_seconds="${SETUP_TERRAFORM_DESTROY_RETRY_DELAY_SECONDS:-30}"
 
+  ensure_browser_vm_running_for_destroy
   warn "Terraform destroy can run long. Azure Firewall deallocation and cross-tenant Private Endpoint deletion are typical long poles."
   stage_log="${SETUP_STAGE_LOG_DIR}/$(printf '%02d' "${SETUP_STAGE_INDEX}")-terraform-destroy.log"
 

@@ -245,8 +245,14 @@ export_admin_tfvars() {
   export TF_VAR_enable_browser_host="${enable_browser}"
   export TF_VAR_windows_browser_jump_host_vm_size="${windows_size:-Standard_D4s_v5}"
   export TF_VAR_windows_browser_jump_host_admin_username="${TF_VAR_windows_browser_jump_host_admin_username:-azureadmin}"
-  export TF_VAR_browser_host_vm_user_login_principal_ids="${TF_VAR_browser_host_vm_user_login_principal_ids:-{}}"
-  export TF_VAR_browser_host_vm_admin_login_principal_ids="${TF_VAR_browser_host_vm_admin_login_principal_ids:-{}}"
+  if [[ -z "${TF_VAR_browser_host_vm_user_login_principal_ids:-}" ]]; then
+    TF_VAR_browser_host_vm_user_login_principal_ids='{}'
+  fi
+  if [[ -z "${TF_VAR_browser_host_vm_admin_login_principal_ids:-}" ]]; then
+    TF_VAR_browser_host_vm_admin_login_principal_ids='{}'
+  fi
+  export TF_VAR_browser_host_vm_user_login_principal_ids
+  export TF_VAR_browser_host_vm_admin_login_principal_ids
   # Validation only: confirms .env produces a complete, well-formed deployment
   # input set and removes any stale generated tfvars artifact. Its exports do not
   # propagate back to this process.
