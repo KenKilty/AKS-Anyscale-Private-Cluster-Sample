@@ -1,0 +1,12 @@
+{
+  "files.associations": {
+    ".env-template": "dotenv"
+  },
+  "python.envFile": "${workspaceFolder}/.env",
+  "python.terminal.useEnvFile": true,
+  // terraform-ls 0.39.0 validates against an embedded schema that predates
+  // AzureRM 5.x, so it reports false errors on 5.x-only attributes such as
+  // private_dns_zone_id. `terraform validate` and the contract tests in the
+  // quality gate remain the authoritative check.
+  "terraform.validation.enableEnhancedValidation": false
+}
